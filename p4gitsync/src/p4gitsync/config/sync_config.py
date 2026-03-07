@@ -1,31 +1,89 @@
 from __future__ import annotations
 
 import fnmatch
+import os
 from dataclasses import dataclass, field
 
 from p4gitsync.config.lfs_config import LfsConfig
 
 
+_KNOWN_SECTIONS = [
+    "INITIAL_IMPORT",
+    "STREAM_POLICY",
+    "LOGGING",
+    "SLACK",
+    "STATE",
+    "REDIS",
+    "SYNC",
+    "API",
+    "GIT",
+    "LFS",
+    "P4",
+]
+
+
+def _coerce_value(raw: str) -> str | int | float | bool:
+    low = raw.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+    return raw
+
+
+def apply_env_overrides(config: dict) -> dict:
+    """P4GITSYNC_{SECTION}_{KEY} 환경변수로 설정값을 오버라이드한다.
+
+    예시:
+        P4GITSYNC_P4_PORT=ssl:server:1666       -> [p4] port
+        P4GITSYNC_SLACK_WEBHOOK_URL=https://...  -> [slack] webhook_url
+        P4GITSYNC_INITIAL_IMPORT_BATCH_SIZE=200  -> [initial_import] batch_size
+        P4GITSYNC_SYNC_POLLING_INTERVAL_SECONDS=60 -> [sync] polling_interval_seconds
+    """
+    prefix = "P4GITSYNC_"
+    for env_key, raw_value in os.environ.items():
+        if not env_key.startswith(prefix):
+            continue
+        remainder = env_key[len(prefix):]
+        for section in _KNOWN_SECTIONS:
+            if remainder.startswith(section + "_"):
+                key = remainder[len(section) + 1:].lower()
+                if not key:
+                    break
+                section_lower = section.lower()
+                if section_lower not in config:
+                    config[section_lower] = {}
+                config[section_lower][key] = _coerce_value(raw_value)
+                break
+    return config
+
+
 @dataclass
 class P4Config:
-    port: str
-    user: str
-    workspace: str
-    stream: str
+    port: str = ""
+    user: str = ""
+    workspace: str = ""
+    stream: str = ""
     filelog_batch_size: int = 200
 
 
 @dataclass
 class GitConfig:
-    repo_path: str
-    remote_url: str
+    repo_path: str = ""
+    remote_url: str = ""
     default_branch: str = "main"
     backend: str = "pygit2"  # "pygit2" or "cli"
 
 
 @dataclass
 class StateConfig:
-    db_path: str
+    db_path: str = ""
 
 
 @dataclass

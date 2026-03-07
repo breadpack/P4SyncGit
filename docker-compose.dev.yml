@@ -1,0 +1,62 @@
+services:
+  p4gitsync:
+    build:
+      context: ./p4gitsync
+      dockerfile: Dockerfile
+    image: p4gitsync:dev
+    restart: "no"
+    volumes:
+      - sync-data:/data
+    environment:
+      - P4GITSYNC_P4_PORT=1666
+      - P4GITSYNC_P4_USER=admin
+      - P4GITSYNC_P4_WORKSPACE=p4sync-dev
+      - P4GITSYNC_P4_STREAM=//depot/main
+      - P4GITSYNC_GIT_REPO_PATH=/data/git-repo
+      - P4GITSYNC_GIT_REMOTE_URL=http://git-server:3000/p4sync/repo.git
+      - P4GITSYNC_GIT_DEFAULT_BRANCH=main
+      - P4GITSYNC_STATE_DB_PATH=/data/state.db
+      - P4GITSYNC_API_ENABLED=true
+      - P4GITSYNC_API_HOST=0.0.0.0
+      - P4GITSYNC_API_PORT=8080
+      - P4GITSYNC_REDIS_ENABLED=true
+      - P4GITSYNC_REDIS_URL=redis://redis:6379/0
+      - P4GITSYNC_LOGGING_LEVEL=DEBUG
+      - P4GITSYNC_LOGGING_FORMAT=text
+    depends_on:
+      redis:
+        condition: service_healthy
+      p4d:
+        condition: service_started
+      git-server:
+        condition: service_started
+    ports:
+      - "8080:8080"
+
+  p4d:
+    image: perforce/helix-core:latest
+    ports:
+      - "1666:1666"
+    environment:
+      - P4PORT=1666
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  git-server:
+    image: gitea/gitea:latest
+    ports:
+      - "3000:3000"
+      - "2222:22"
+    environment:
+      - GITEA__database__DB_TYPE=sqlite3
+
+volumes:
+  sync-data:

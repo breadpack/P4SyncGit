@@ -6,7 +6,7 @@ import tomllib
 from pathlib import Path
 
 from p4gitsync.config.logging_config import setup_logging
-from p4gitsync.config.sync_config import AppConfig
+from p4gitsync.config.sync_config import AppConfig, apply_env_overrides
 from p4gitsync.services.sync_orchestrator import SyncOrchestrator
 
 logger = logging.getLogger("p4gitsync")
@@ -14,11 +14,18 @@ logger = logging.getLogger("p4gitsync")
 
 def load_config(path: str = "config.toml") -> AppConfig:
     config_path = Path(path)
-    if not config_path.exists():
-        print(f"설정 파일을 찾을 수 없습니다: {path}", file=sys.stderr)
+    if config_path.exists():
+        with open(config_path, "rb") as f:
+            raw = tomllib.load(f)
+    else:
+        raw = {}
+    raw = apply_env_overrides(raw)
+    if not raw.get("p4") and not raw.get("git") and not raw.get("state"):
+        print(
+            f"설정 파일({path})이 없고 환경변수(P4GITSYNC_*)도 설정되지 않았습니다.",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    with open(config_path, "rb") as f:
-        raw = tomllib.load(f)
     return AppConfig.from_dict(raw)
 
 

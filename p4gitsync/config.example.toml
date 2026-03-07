@@ -1,0 +1,71 @@
+# P4GitSync 설정 파일
+# 모든 값은 P4GITSYNC_{SECTION}_{KEY} 환경변수로 오버라이드 가능
+# 예: P4GITSYNC_P4_PORT=ssl:server:1666
+
+[p4]
+port = "ssl:p4server:1666"
+user = "p4sync-service"
+workspace = "p4sync-main"
+stream = "//YourDepot/main"
+filelog_batch_size = 200
+
+[git]
+repo_path = "/data/git-repo"
+remote_url = "git@github.com:org/repo.git"
+default_branch = "main"
+
+[state]
+db_path = "/data/state.db"
+
+[sync]
+polling_interval_seconds = 30
+batch_size = 50
+push_after_every_commit = false
+file_extraction_mode = "print"
+print_to_sync_threshold = 50
+git_gc_interval = 5000
+error_retry_threshold = 3
+
+[initial_import]
+mode = "full_history"
+start_changelist = 1
+batch_size = 100
+resume_on_restart = true
+checkpoint_interval = 1000
+use_fast_import = true
+replica_port = ""
+
+[logging]
+level = "INFO"
+format = "json"
+file = ""
+
+[api]
+enabled = true
+host = "0.0.0.0"
+port = 8080
+
+[redis]
+enabled = false
+url = "redis://localhost:6379/0"
+stream_key = "p4sync:events"
+group_name = "p4sync-workers"
+consumer_name = "worker-1"
+
+[slack]
+webhook_url = ""
+channel = "#p4sync-alerts"
+
+[lfs]
+enabled = false
+extensions = [".uasset", ".umap", ".fbx", ".png", ".jpg"]
+lockable_extensions = [".uasset", ".umap"]
+server_type = "builtin"
+server_url = ""
+size_threshold_bytes = 102400
+
+[stream_policy]
+auto_discover = true
+include_patterns = ["//YourDepot/*"]
+exclude_types = ["virtual"]
+task_stream_policy = "ignore"
