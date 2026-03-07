@@ -1,0 +1,49 @@
+[
+  {
+    "changelist": 1,
+    "user": "admin",
+    "description": "Initial project setup",
+    "timestamp": 1700000000,
+    "files": [
+      {"depot_path": "//ProjectSTAR/main/README.md", "action": "add", "file_type": "text", "revision": 1},
+      {"depot_path": "//ProjectSTAR/main/src/main.py", "action": "add", "file_type": "text", "revision": 1}
+    ]
+  },
+  {
+    "changelist": 2,
+    "user": "developer1",
+    "description": "Add utility module",
+    "timestamp": 1700001000,
+    "files": [
+      {"depot_path": "//ProjectSTAR/main/src/utils.py", "action": "add", "file_type": "text", "revision": 1}
+    ]
+  },
+  {
+    "changelist": 3,
+    "user": "developer1",
+    "description": "Update main module",
+    "timestamp": 1700002000,
+    "files": [
+      {"depot_path": "//ProjectSTAR/main/src/main.py", "action": "edit", "file_type": "text", "revision": 2}
+    ]
+  },
+  {
+    "changelist": 4,
+    "user": "developer2",
+    "description": "Remove old utility",
+    "timestamp": 1700003000,
+    "files": [
+      {"depot_path": "//ProjectSTAR/main/src/old_utils.py", "action": "delete", "file_type": "text", "revision": 2}
+    ]
+  },
+  {
+    "changelist": 5,
+    "user": "developer1",
+    "description": "Rename config file",
+    "timestamp": 1700004000,
+    "files": [
+      {"depot_path": "//ProjectSTAR/main/config.old", "action": "move/delete", "file_type": "text", "revision": 1},
+      {"depot_path": "//ProjectSTAR/main/config.yaml", "action": "move/add", "file_type": "text", "revision": 1}
+    ]
+  }
+]

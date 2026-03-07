@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "p4gitsync"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "p4python>=2024.1",
+    "pygit2>=1.14",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "slack-sdk>=3.27",
+    "redis>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+    "memory-profiler>=0.61",
+]
+
+[project.scripts]
+p4gitsync = "p4gitsync.__main__:main"

@@ -1,0 +1,41 @@
+[p4]
+port = "ssl:p4server:1666"
+user = "p4sync-service"
+workspace = "p4sync-main"
+stream = "//ProjectSTAR/main"
+filelog_batch_size = 200
+
+[git]
+repo_path = "/data/p4sync/git-repo"
+remote_url = "git@github.com:org/project-star.git"
+default_branch = "main"
+
+[state]
+db_path = "/data/p4sync/state.db"
+
+[sync]
+polling_interval_seconds = 30
+batch_size = 50
+push_after_every_commit = false
+file_extraction_mode = "print"
+print_to_sync_threshold = 50
+git_gc_interval = 5000
+error_retry_threshold = 3
+
+[initial_import]
+mode = "full_history"
+start_changelist = 1
+batch_size = 100
+resume_on_restart = true
+checkpoint_interval = 1000
+use_fast_import = true
+replica_port = ""
+
+[logging]
+level = "INFO"
+format = "json"
+file = "/var/log/p4gitsync/sync.log"
+
+[slack]
+webhook_url = ""
+channel = "#p4sync-alerts"
