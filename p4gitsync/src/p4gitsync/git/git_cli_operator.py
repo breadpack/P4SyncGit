@@ -61,6 +61,21 @@ class GitCliOperator:
     ) -> str:
         return self._do_commit(branch, list(parent_shas), metadata, file_changes, deletes)
 
+    def create_branch(self, branch: str, start_sha: str) -> None:
+        """지정 commit에서 새 branch 생성."""
+        existing = self._run_git("rev-parse", f"refs/heads/{branch}")
+        if existing.returncode == 0:
+            logger.info("branch '%s' 이미 존재 — 건너뜀", branch)
+            return
+        result = self._run_git("update-ref", f"refs/heads/{branch}", start_sha)
+        if result.returncode != 0:
+            raise RuntimeError(f"branch 생성 실패: {result.stderr.decode()}")
+        logger.info("branch 생성: %s (from %s)", branch, start_sha[:12])
+
+    def create_orphan_branch(self, branch: str) -> None:
+        """orphan branch는 첫 commit 시 자동 생성되므로 별도 작업 불필요."""
+        logger.info("orphan branch '%s' 예약 (첫 commit 시 생성)", branch)
+
     def push(self, branch: str) -> None:
         result = self._run_git("push", "origin", branch)
         if result.returncode != 0:

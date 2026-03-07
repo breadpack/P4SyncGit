@@ -2,10 +2,14 @@ import logging
 import subprocess
 import time
 
+from p4gitsync.config.lfs_config import LfsConfig
+from p4gitsync.config.sync_config import InitialImportConfig
 from p4gitsync.git.commit_metadata import CommitMetadata
 from p4gitsync.git.fast_importer import FastImporter
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_client import P4Client
+from p4gitsync.p4.p4_file_action import ADD_EDIT_ACTIONS, DELETE_ACTIONS
+from p4gitsync.p4.path_utils import depot_to_git_path
 from p4gitsync.state.state_store import StateStore
 
 logger = logging.getLogger("p4gitsync.initial_import")
@@ -20,18 +24,20 @@ class InitialImporter:
         state_store: StateStore,
         repo_path: str,
         stream: str,
-        config: dict | None = None,
+        config: InitialImportConfig | None = None,
+        lfs_config: LfsConfig | None = None,
     ) -> None:
         self._p4 = p4_client
         self._state = state_store
         self._repo_path = repo_path
         self._stream = stream
         self._stream_prefix_len = len(stream) + 1
+        self._lfs = lfs_config
 
-        cfg = config or {}
-        self._checkpoint_interval = cfg.get("checkpoint_interval", 1000)
-        self._server_load_threshold = cfg.get("server_load_threshold", 50)
-        self._throttle_wait_seconds = cfg.get("throttle_wait_seconds", 60)
+        cfg = config or InitialImportConfig()
+        self._checkpoint_interval = cfg.checkpoint_interval
+        self._server_load_threshold = 50
+        self._throttle_wait_seconds = 60
 
     def run(self, branch: str) -> None:
         """전체 히스토리 import 실행 (재개 지원)."""
@@ -56,6 +62,14 @@ class InitialImporter:
 
                 info = self._p4.describe(cl)
                 files, deletes = self._extract_files(info)
+
+                if i == 0 and self._lfs and self._lfs.enabled:
+                    gitattributes_content = self._lfs.generate_gitattributes().encode("utf-8")
+                    files.insert(0, (".gitattributes", gitattributes_content))
+                    lfsconfig_content = self._lfs.generate_lfsconfig()
+                    if lfsconfig_content is not None:
+                        files.insert(1, (".lfsconfig", lfsconfig_content.encode("utf-8")))
+
                 name, email = self._state.get_git_author(info.user)
 
                 metadata = CommitMetadata(
@@ -95,23 +109,20 @@ class InitialImporter:
         deletes: list[str] = []
 
         for fa in info.files:
-            git_path = self._depot_to_git_path(fa.depot_path)
+            git_path = depot_to_git_path(fa.depot_path, self._stream, self._stream_prefix_len)
             if git_path is None:
                 continue
 
-            if fa.action in ("delete", "move/delete", "purge"):
+            if fa.action in DELETE_ACTIONS:
                 deletes.append(git_path)
-            elif fa.action in ("add", "edit", "branch", "integrate", "move/add"):
+            elif fa.action in ADD_EDIT_ACTIONS:
                 content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
                 if content is not None:
+                    if self._lfs and self._lfs.enabled and self._lfs.is_lfs_target(git_path):
+                        content = LfsConfig.create_lfs_pointer(content)
                     files.append((git_path, content))
 
         return files, deletes
-
-    def _depot_to_git_path(self, depot_path: str) -> str | None:
-        if not depot_path.startswith(self._stream + "/"):
-            return None
-        return depot_path[self._stream_prefix_len:]
 
     def _throttle_if_needed(self) -> None:
         """P4 서버 과부하 시 대기."""
@@ -122,7 +133,7 @@ class InitialImporter:
                 )
                 time.sleep(self._throttle_wait_seconds)
         except Exception:
-            pass
+            logger.exception("서버 부하 확인 중 오류 발생")
 
     def _post_import(self, branch: str, all_changes: list[int]) -> None:
         """import 완료 후 Git SHA 매핑 업데이트."""

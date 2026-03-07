@@ -1,4 +1,7 @@
 import logging
+import time
+from functools import wraps
+from typing import TypeVar, Callable, ParamSpec
 
 from P4 import P4, P4Exception
 
@@ -6,6 +9,30 @@ from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_file_action import P4FileAction
 
 logger = logging.getLogger("p4gitsync.p4")
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+_MAX_RECONNECT_RETRIES = 3
+_BASE_RECONNECT_DELAY = 1.0
+
+
+def _auto_reconnect(func: Callable[P, T]) -> Callable[P, T]:
+    """P4 연결 끊김 시 자동 재연결 후 재시도하는 데코레이터."""
+
+    @wraps(func)
+    def wrapper(self: "P4Client", *args: P.args, **kwargs: P.kwargs) -> T:
+        self._ensure_connected()
+        try:
+            return func(self, *args, **kwargs)
+        except P4Exception as e:
+            if not self._p4.connected():
+                logger.warning("P4 연결 끊김 감지, 재연결 시도: %s", e)
+                self._reconnect_with_backoff()
+                return func(self, *args, **kwargs)
+            raise
+
+    return wrapper
 
 
 class P4Client:
@@ -24,6 +51,30 @@ class P4Client:
             self._p4.disconnect()
             logger.info("P4 연결 해제")
 
+    def _ensure_connected(self) -> None:
+        """연결이 끊어져 있으면 재연결."""
+        if not self._p4.connected():
+            logger.info("P4 연결 끊어짐 — 재연결 시도")
+            self._p4.connect()
+            logger.info("P4 재연결 성공: %s@%s", self._p4.user, self._p4.port)
+
+    def _reconnect_with_backoff(self) -> None:
+        """exponential backoff 기반 재연결."""
+        for attempt in range(1, _MAX_RECONNECT_RETRIES + 1):
+            delay = _BASE_RECONNECT_DELAY * (2 ** (attempt - 1))
+            try:
+                logger.info("P4 재연결 시도 %d/%d (%.1fs 후)", attempt, _MAX_RECONNECT_RETRIES, delay)
+                time.sleep(delay)
+                if self._p4.connected():
+                    self._p4.disconnect()
+                self._p4.connect()
+                logger.info("P4 재연결 성공")
+                return
+            except P4Exception as e:
+                logger.warning("P4 재연결 실패 (%d/%d): %s", attempt, _MAX_RECONNECT_RETRIES, e)
+        raise P4Exception("P4 재연결 실패: 최대 재시도 횟수 초과")
+
+    @_auto_reconnect
     def get_changes_after(self, stream: str, after_cl: int) -> list[int]:
         """지정 CL 이후의 submitted changelist 목록 조회 (오름차순)."""
         results = self._p4.run_changes(
@@ -33,6 +84,7 @@ class P4Client:
         )
         return sorted(int(r["change"]) for r in results)
 
+    @_auto_reconnect
     def get_all_changes(self, stream: str) -> list[int]:
         """stream의 전체 submitted changelist 목록 조회 (오름차순)."""
         results = self._p4.run_changes(
@@ -41,6 +93,7 @@ class P4Client:
         )
         return sorted(int(r["change"]) for r in results)
 
+    @_auto_reconnect
     def describe(self, changelist: int) -> P4ChangeInfo:
         """changelist 상세 정보 (파일 목록, action, 설명, 작성자)."""
         results = self._p4.run_describe("-s", str(changelist))
@@ -62,6 +115,7 @@ class P4Client:
             files=files,
         )
 
+    @_auto_reconnect
     def print_file(self, depot_path: str, revision: int, output_path: str) -> None:
         """특정 리비전의 파일 내용을 로컬 경로에 출력."""
         self._p4.run_print(
@@ -81,6 +135,7 @@ class P4Client:
             )
             return False
 
+    @_auto_reconnect
     def print_file_to_bytes(self, depot_path: str, revision: int) -> bytes | None:
         """특정 리비전의 파일 내용을 bytes로 반환. 실패 시 None."""
         try:
@@ -98,23 +153,87 @@ class P4Client:
             )
             return None
 
+    @_auto_reconnect
+    def print_file_to_bytes_head(self, depot_path: str) -> bytes | None:
+        """최신 리비전(#head)의 파일 내용을 bytes로 반환. 실패 시 None."""
+        try:
+            results = self._p4.run_print(f"{depot_path}#head")
+            if len(results) >= 2:
+                content = results[1]
+                if isinstance(content, bytes):
+                    return content
+                return content.encode("utf-8")
+            return None
+        except P4Exception as e:
+            logger.warning("파일 내용 추출 실패: %s#head — %s", depot_path, e)
+            return None
+
+    @_auto_reconnect
+    def print_files_batch(
+        self, file_specs: list[str],
+    ) -> dict[str, bytes | None]:
+        """다중 파일을 단일 p4 print 호출로 일괄 추출.
+
+        Args:
+            file_specs: "depot_path#revision" 형식의 파일 스펙 목록.
+
+        Returns:
+            {depot_path: bytes | None} 딕셔너리.
+        """
+        result_map: dict[str, bytes | None] = {}
+        if not file_specs:
+            return result_map
+
+        try:
+            results = self._p4.run_print(*file_specs)
+        except P4Exception as e:
+            logger.warning("batch print 실패, 개별 추출로 fallback: %s", e)
+            for spec in file_specs:
+                path = spec.split("#")[0]
+                rev = int(spec.split("#")[1]) if "#" in spec else 0
+                result_map[path] = self.print_file_to_bytes(path, rev)
+            return result_map
+
+        # p4 print 결과: [metadata_dict, content, metadata_dict, content, ...]
+        i = 0
+        while i < len(results):
+            if isinstance(results[i], dict):
+                depot_file = results[i].get("depotFile", "")
+                content = None
+                if i + 1 < len(results) and not isinstance(results[i + 1], dict):
+                    raw = results[i + 1]
+                    content = raw if isinstance(raw, bytes) else raw.encode("utf-8")
+                    i += 2
+                else:
+                    i += 1
+                result_map[depot_file] = content
+            else:
+                i += 1
+
+        return result_map
+
+    @_auto_reconnect
     def sync(self, changelist: int) -> None:
         """워크스페이스를 특정 CL 시점으로 sync."""
         self._p4.run_sync(f"//...@{changelist}")
 
+    @_auto_reconnect
     def get_users(self) -> list[dict]:
         """전체 P4 사용자 목록 조회."""
         return self._p4.run_users()
 
+    @_auto_reconnect
     def get_stream_info(self, stream: str) -> dict:
         """stream 상세 정보 조회."""
         results = self._p4.run_stream("-o", stream)
         return results[0] if results else {}
 
+    @_auto_reconnect
     def get_streams(self, depot: str) -> list[dict]:
         """depot 하위 전체 stream 목록 조회."""
         return self._p4.run_streams(f"{depot}/...")
 
+    @_auto_reconnect
     def run_filelog(self, depot_paths: list[str], batch_size: int = 200) -> list:
         """다중 파일 filelog 배치 조회. batch_size 단위로 분할."""
         all_results = []
@@ -124,6 +243,7 @@ class P4Client:
             all_results.extend(results)
         return all_results
 
+    @_auto_reconnect
     def check_server_load(self, threshold: int = 50) -> bool:
         """P4 서버 부하 확인. 과부하 시 True 반환."""
         try:

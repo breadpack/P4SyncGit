@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 
+DELETE_ACTIONS = frozenset({"delete", "move/delete", "purge"})
+ADD_EDIT_ACTIONS = frozenset({"add", "edit", "branch", "integrate", "move/add"})
+
 
 @dataclass
 class P4FileAction:

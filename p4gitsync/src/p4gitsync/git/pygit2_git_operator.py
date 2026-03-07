@@ -1,6 +1,9 @@
 import logging
 import os
 import subprocess
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
 from typing import Sequence
 
 import pygit2
@@ -8,6 +11,44 @@ import pygit2
 from p4gitsync.git.commit_metadata import CommitMetadata
 
 logger = logging.getLogger("p4gitsync.git.pygit2")
+
+_GC_WEEKLY_SECONDS = 7 * 24 * 3600
+_LOOSE_OBJECT_THRESHOLD = 10000
+
+
+@dataclass
+class _TreeNode:
+    """prefix별 사전 분류된 tree 변경 정보."""
+    blobs: dict[str, pygit2.Oid] = field(default_factory=dict)
+    delete_names: set[str] = field(default_factory=set)
+    children: dict[str, "_TreeNode"] = field(default_factory=dict)
+
+    @staticmethod
+    def build(
+        path_blobs: dict[str, pygit2.Oid],
+        delete_set: set[str],
+    ) -> "_TreeNode":
+        """전체 경로 목록을 한 번 순회하여 트리 구조로 분류. O(N)."""
+        root = _TreeNode()
+        for path, blob_oid in path_blobs.items():
+            parts = path.split("/")
+            node = root
+            for part in parts[:-1]:
+                if part not in node.children:
+                    node.children[part] = _TreeNode()
+                node = node.children[part]
+            node.blobs[parts[-1]] = blob_oid
+
+        for path in delete_set:
+            parts = path.split("/")
+            node = root
+            for part in parts[:-1]:
+                if part not in node.children:
+                    node.children[part] = _TreeNode()
+                node = node.children[part]
+            node.delete_names.add(parts[-1])
+
+        return root
 
 
 class Pygit2GitOperator:
@@ -18,6 +59,8 @@ class Pygit2GitOperator:
         self._remote_url = remote_url
         self._repo: pygit2.Repository | None = None
         self._commit_count = 0
+        self._last_gc_time: float = 0.0
+        self._last_repack_time: float = 0.0
 
     def init_repo(self) -> None:
         if os.path.exists(os.path.join(self._repo_path, ".git")):
@@ -60,6 +103,21 @@ class Pygit2GitOperator:
         parents = [pygit2.Oid(hex=sha) for sha in parent_shas]
         return self._do_commit(branch, parents, metadata, file_changes, deletes)
 
+    def create_branch(self, branch: str, start_sha: str) -> None:
+        """지정 commit에서 새 branch 생성."""
+        ref_name = f"refs/heads/{branch}"
+        existing = self._repo.references.get(ref_name)
+        if existing is not None:
+            logger.info("branch '%s' 이미 존재 — 건너뜀", branch)
+            return
+        target = pygit2.Oid(hex=start_sha)
+        self._repo.references.create(ref_name, target)
+        logger.info("branch 생성: %s (from %s)", branch, start_sha[:12])
+
+    def create_orphan_branch(self, branch: str) -> None:
+        """orphan branch는 첫 commit 시 자동 생성되므로 별도 작업 불필요."""
+        logger.info("orphan branch '%s' 예약 (첫 commit 시 생성)", branch)
+
     def push(self, branch: str) -> None:
         """push는 항상 git CLI 사용 (pygit2의 인증 복잡성 회피)."""
         result = subprocess.run(
@@ -83,15 +141,59 @@ class Pygit2GitOperator:
             return None
 
     def maybe_run_gc(self, gc_interval: int) -> None:
-        if self._commit_count > 0 and self._commit_count % gc_interval == 0:
-            subprocess.run(
-                ["git", "gc", "--auto"],
-                cwd=self._repo_path,
-                check=True,
-                capture_output=True,
-            )
-            self._repo = pygit2.Repository(self._repo_path)
-            logger.info("git gc 실행 완료 (commit count: %d)", self._commit_count)
+        """시간 기반 gc + loose object 임계값 기반 즉시 gc."""
+        now = time.monotonic()
+
+        # loose object 수 초과 시 즉시 gc
+        if self._count_loose_objects() > _LOOSE_OBJECT_THRESHOLD:
+            self._run_gc(now)
+            return
+
+        # 주 1회 시간 기반 gc
+        if now - self._last_gc_time > _GC_WEEKLY_SECONDS:
+            self._run_gc(now)
+            return
+
+        # 주 1회 repack
+        if now - self._last_repack_time > _GC_WEEKLY_SECONDS:
+            self._run_repack(now)
+
+    def _run_gc(self, now: float) -> None:
+        subprocess.run(
+            ["git", "gc", "--auto"],
+            cwd=self._repo_path,
+            check=True,
+            capture_output=True,
+        )
+        self._repo = pygit2.Repository(self._repo_path)
+        self._last_gc_time = now
+        logger.info("git gc 실행 완료 (commit count: %d)", self._commit_count)
+
+    def _run_repack(self, now: float) -> None:
+        subprocess.run(
+            ["git", "repack", "-a", "-d"],
+            cwd=self._repo_path,
+            check=True,
+            capture_output=True,
+        )
+        self._repo = pygit2.Repository(self._repo_path)
+        self._last_repack_time = now
+        logger.info("git repack 실행 완료")
+
+    def _count_loose_objects(self) -> int:
+        """objects 디렉토리의 loose object 수를 추정."""
+        objects_dir = os.path.join(self._repo_path, ".git", "objects")
+        if not os.path.isdir(objects_dir):
+            objects_dir = os.path.join(self._repo_path, "objects")
+        if not os.path.isdir(objects_dir):
+            return 0
+        count = 0
+        for d in os.listdir(objects_dir):
+            if len(d) == 2 and d != "pa" and d != "in":
+                subdir = os.path.join(objects_dir, d)
+                if os.path.isdir(subdir):
+                    count += len(os.listdir(subdir))
+        return count
 
     @property
     def commit_count(self) -> int:
@@ -147,69 +249,39 @@ class Pygit2GitOperator:
 
         delete_set = set(deletes) if deletes else set()
 
-        return self._rebuild_tree(prev_tree, path_blobs, delete_set, "")
+        # O(N) 사전 분류: 전체 경로를 한 번만 순회
+        tree_node = _TreeNode.build(path_blobs, delete_set)
+        return self._rebuild_tree(prev_tree, tree_node)
 
     def _rebuild_tree(
         self,
         prev_tree: pygit2.Tree | None,
-        path_blobs: dict[str, pygit2.Oid],
-        delete_set: set[str],
-        prefix: str,
+        node: _TreeNode,
     ) -> pygit2.Oid:
-        """prev_tree를 기반으로 변경/삭제를 적용한 새 Tree 구성.
+        """prev_tree를 기반으로 사전 분류된 변경/삭제를 적용하여 새 Tree 구성.
 
-        1. 이 prefix 아래의 직접 파일(blob)과 하위 디렉토리(tree)를 분류
-        2. prev_tree의 기존 항목을 유지/수정/삭제
-        3. 새로운 파일/디렉토리 추가
+        _TreeNode에 이미 레벨별로 분류되어 있으므로 각 레벨에서 O(entries) 처리.
         """
-        # 이 레벨에서 직접 추가/수정할 blob과 재귀할 하위 디렉토리 분류
-        direct_blobs: dict[str, pygit2.Oid] = {}
-        child_dirs: set[str] = set()
-
-        for path, blob_oid in path_blobs.items():
-            if not path.startswith(prefix):
-                continue
-            relative = path[len(prefix):]
-            parts = relative.split("/")
-            if len(parts) == 1:
-                direct_blobs[parts[0]] = blob_oid
-            else:
-                child_dirs.add(parts[0])
-
-        delete_names: set[str] = set()
-        delete_child_dirs: set[str] = set()
-        for path in delete_set:
-            if not path.startswith(prefix):
-                continue
-            relative = path[len(prefix):]
-            parts = relative.split("/")
-            if len(parts) == 1:
-                delete_names.add(parts[0])
-            else:
-                delete_child_dirs.add(parts[0])
-
         tb = self._repo.TreeBuilder()
         processed_names: set[str] = set()
 
-        # 기존 tree의 항목 처리
         if prev_tree is not None:
             for entry in prev_tree:
                 name = entry.name
 
                 if entry.type_str == "blob":
-                    if name in delete_names:
+                    if name in node.delete_names:
                         continue
-                    if name in direct_blobs:
-                        tb.insert(name, direct_blobs[name], pygit2.GIT_FILEMODE_BLOB)
+                    if name in node.blobs:
+                        tb.insert(name, node.blobs[name], pygit2.GIT_FILEMODE_BLOB)
                         processed_names.add(name)
                     else:
                         tb.insert(name, entry.id, entry.filemode)
                 elif entry.type_str == "tree":
-                    if name in child_dirs or name in delete_child_dirs:
+                    if name in node.children:
                         child_tree = self._repo.get(entry.id)
-                        child_prefix = f"{prefix}{name}/"
                         new_subtree = self._rebuild_tree(
-                            child_tree, path_blobs, delete_set, child_prefix
+                            child_tree, node.children[name],
                         )
                         tree_obj = self._repo.get(new_subtree)
                         if len(tree_obj) > 0:
@@ -218,18 +290,15 @@ class Pygit2GitOperator:
                     else:
                         tb.insert(name, entry.id, entry.filemode)
 
-        # 새 blob 추가 (prev_tree에 없던 것)
-        for name, blob_oid in direct_blobs.items():
+        # 새 blob 추가
+        for name, blob_oid in node.blobs.items():
             if name not in processed_names:
                 tb.insert(name, blob_oid, pygit2.GIT_FILEMODE_BLOB)
 
-        # 새 디렉토리 추가 (prev_tree에 없던 것)
-        for dir_name in child_dirs:
+        # 새 디렉토리 추가
+        for dir_name, child_node in node.children.items():
             if dir_name not in processed_names:
-                child_prefix = f"{prefix}{dir_name}/"
-                new_subtree = self._rebuild_tree(
-                    None, path_blobs, delete_set, child_prefix
-                )
+                new_subtree = self._rebuild_tree(None, child_node)
                 tree_obj = self._repo.get(new_subtree)
                 if len(tree_obj) > 0:
                     tb.insert(dir_name, new_subtree, pygit2.GIT_FILEMODE_TREE)
