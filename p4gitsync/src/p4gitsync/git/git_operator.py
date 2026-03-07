@@ -32,6 +32,14 @@ class GitOperator(Protocol):
         """merge commit 생성 (parent 2개 이상). commit SHA 반환."""
         ...
 
+    def create_branch(self, branch: str, start_sha: str) -> None:
+        """지정 commit에서 새 branch 생성."""
+        ...
+
+    def create_orphan_branch(self, branch: str) -> None:
+        """parent 없는 orphan branch 생성 (mainline용)."""
+        ...
+
     def push(self, branch: str) -> None:
         """remote push."""
         ...
