@@ -1,0 +1,61 @@
+services:
+  p4gitsync:
+    build:
+      context: ./p4gitsync
+      dockerfile: Dockerfile
+    image: ghcr.io/breadpack/p4gitsync:latest
+    restart: unless-stopped
+    volumes:
+      - sync-data:/data
+      # 설정 파일 마운트 (환경변수만 사용할 경우 제거 가능)
+      # - ./p4gitsync/config.toml:/app/config.toml:ro
+      # Git SSH key 마운트
+      # - ${HOME}/.ssh:/home/p4sync/.ssh:ro
+    environment:
+      # -- 필수: P4 설정 --
+      - P4GITSYNC_P4_PORT=ssl:p4server:1666
+      - P4GITSYNC_P4_USER=p4sync-service
+      - P4GITSYNC_P4_WORKSPACE=p4sync-main
+      - P4GITSYNC_P4_STREAM=//YourDepot/main
+      # -- 필수: Git 설정 --
+      - P4GITSYNC_GIT_REPO_PATH=/data/git-repo
+      - P4GITSYNC_GIT_REMOTE_URL=git@github.com:org/repo.git
+      - P4GITSYNC_GIT_DEFAULT_BRANCH=main
+      # -- 필수: State DB --
+      - P4GITSYNC_STATE_DB_PATH=/data/state.db
+      # -- API --
+      - P4GITSYNC_API_ENABLED=true
+      - P4GITSYNC_API_HOST=0.0.0.0
+      - P4GITSYNC_API_PORT=8080
+      # -- Redis --
+      - P4GITSYNC_REDIS_ENABLED=true
+      - P4GITSYNC_REDIS_URL=redis://redis:6379/0
+      # -- Slack (시크릿) --
+      - P4GITSYNC_SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
+      # -- Logging --
+      - P4GITSYNC_LOGGING_LEVEL=INFO
+      - P4GITSYNC_LOGGING_FORMAT=json
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  sync-data:
+  redis-data:
