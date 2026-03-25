@@ -6,22 +6,28 @@ import time
 from types import TracebackType
 
 from p4gitsync.config.sync_config import AppConfig
+from p4gitsync.git.commit_metadata import parse_git_commit_from_description
+from p4gitsync.git.git_change_detector import GitChangeDetector
 from p4gitsync.git.git_operator import GitOperator
 from p4gitsync.notifications.daily_report import DailyReporter
 from p4gitsync.notifications.notifier import SlackNotifier
 from p4gitsync.notifications.silence_detector import SilenceDetector
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer
 from p4gitsync.p4.p4_client import P4Client
+from p4gitsync.p4.p4_submitter import P4Submitter
 from p4gitsync.services.changelist_poller import ChangelistPoller
 from p4gitsync.services.circuit_breaker import IntegrityCircuitBreaker
 from p4gitsync.services.commit_builder import CommitBuilder
+from p4gitsync.services.conflict_detector import ConflictDetector
 from p4gitsync.services.db_backup import DatabaseBackup
 from p4gitsync.services.event_collector import EventCollector
 from p4gitsync.services.event_consumer import EventConsumer
 from p4gitsync.services.integrity_checker import IntegrityChecker
 from p4gitsync.services.multi_stream_sync import MultiStreamHandler
+from p4gitsync.services.reverse_commit_builder import ReverseCommitBuilder
 from p4gitsync.services.stream_watcher import StreamWatcher
 from p4gitsync.services.sync_maintenance import SyncMaintenanceRunner
+from p4gitsync.services.user_mapper import UserMapper
 from p4gitsync.state.state_store import StateStore
 
 logger = logging.getLogger("p4gitsync.orchestrator")
@@ -47,6 +53,11 @@ class SyncOrchestrator:
         self._circuit_breaker: IntegrityCircuitBreaker | None = None
         self._multi_stream: MultiStreamHandler | None = None
         self._maintenance: SyncMaintenanceRunner | None = None
+        self._git_change_detector: GitChangeDetector | None = None
+        self._p4_submitter: P4Submitter | None = None
+        self._reverse_builders: dict[str, ReverseCommitBuilder] = {}
+        self._conflict_detector: ConflictDetector | None = None
+        self._user_mapper: UserMapper | None = None
         self._unpushed_commits = 0
         self._last_push_time: float = 0.0
         self._running = False
@@ -99,11 +110,17 @@ class SyncOrchestrator:
         return len(mappings) > 1
 
     def _start_single_stream(self) -> None:
-        logger.info("동기화 시작 (단일 stream): stream=%s", self._config.p4.stream)
+        stream = self._config.p4.stream
+        branch = self._config.git.default_branch
+        logger.info("동기화 시작 (단일 stream): stream=%s", stream)
         while self._running:
             try:
                 self._maintenance.run()
-                self._poll_and_sync()
+                direction = self._get_stream_direction(stream)
+                if direction != "git_to_p4":
+                    self._poll_and_sync()
+                if direction in ("bidirectional", "git_to_p4"):
+                    self._poll_reverse_sync(stream, branch)
             except Exception:
                 logger.exception("폴링 루프 에러")
             time.sleep(self._config.sync.polling_interval_seconds)
@@ -159,6 +176,12 @@ class SyncOrchestrator:
 
             self._poller = ChangelistPoller(self._p4_client, self._state_store)
             self._merge_analyzer = MergeAnalyzer(self._p4_client)
+
+            self._user_mapper = UserMapper(
+                config=self._config.user_mapping,
+                state_store=self._state_store,
+            )
+
             self._commit_builder = CommitBuilder(
                 p4_client=self._p4_client,
                 git_operator=self._git_operator,
@@ -166,6 +189,7 @@ class SyncOrchestrator:
                 stream=self._config.p4.stream,
                 lfs_config=self._config.lfs if self._config.lfs.enabled else None,
                 merge_analyzer=self._merge_analyzer,
+                user_mapper=self._user_mapper,
             )
 
             event_collector = EventCollector(
@@ -238,6 +262,8 @@ class SyncOrchestrator:
                 silence_detector=self._silence_detector,
                 daily_reporter=self._daily_reporter,
             )
+
+            self._initialize_bidirectional()
         except Exception:
             self._cleanup_components()
             raise
@@ -246,13 +272,14 @@ class SyncOrchestrator:
         backend = self._config.git.backend
         repo_path = self._config.git.repo_path
         remote_url = self._config.git.remote_url
+        bare = self._config.git.bare
 
         if backend == "cli":
             from p4gitsync.git.git_cli_operator import GitCliOperator
-            return GitCliOperator(repo_path=repo_path, remote_url=remote_url)
+            return GitCliOperator(repo_path=repo_path, remote_url=remote_url, bare=bare)
 
         from p4gitsync.git.pygit2_git_operator import Pygit2GitOperator
-        return Pygit2GitOperator(repo_path=repo_path, remote_url=remote_url)
+        return Pygit2GitOperator(repo_path=repo_path, remote_url=remote_url, bare=bare)
 
     def _verify_on_startup(self) -> None:
         branch = self._config.git.default_branch
@@ -334,6 +361,12 @@ class SyncOrchestrator:
     def _process_changelist(self, cl: int, stream: str, branch: str) -> None:
         info = self._p4_client.describe(cl)
 
+        # Git에서 역방향으로 submit된 CL이면 스킵
+        if parse_git_commit_from_description(info.description):
+            logger.debug("GitCommit 마커 발견, 스킵: CL %d", cl)
+            self._state_store.set_last_synced_cl(stream, cl, "")
+            return
+
         last_cl = self._state_store.get_last_synced_cl(stream)
         parent_sha = self._state_store.get_commit_sha(last_cl, stream) if last_cl > 0 else None
 
@@ -412,3 +445,159 @@ class SyncOrchestrator:
             logger.error("Redis CL %d 처리 실패 (retry=%d): %s", changelist, retry_count, e)
             if retry_count >= self._config.sync.error_retry_threshold:
                 self._notifier.send_error(changelist, stream, str(e))
+
+    # ── 양방향 동기화 ──
+
+    def _has_bidirectional_streams(self) -> bool:
+        """bidirectional 또는 git_to_p4 방향 stream이 있는지 확인."""
+        policy = self._config.stream_policy
+        for sd in policy.sync_directions:
+            if sd.direction in ("bidirectional", "git_to_p4"):
+                return True
+        return False
+
+    def _initialize_bidirectional(self) -> None:
+        """양방향 동기화 컴포넌트 초기화. bidirectional stream이 없으면 스킵."""
+        if not self._has_bidirectional_streams():
+            return
+
+        self._git_change_detector = GitChangeDetector(
+            git_operator=self._git_operator,
+            state_store=self._state_store,
+            remote=self._config.git.watch_remote,
+        )
+
+        submit_ws = self._config.p4.submit_workspace or self._config.p4.workspace
+        self._p4_submitter = P4Submitter(
+            p4_client=self._p4_client,
+            workspace=submit_ws,
+            submit_as_user=self._config.p4.submit_as_user,
+        )
+        self._p4_submitter.initialize()
+
+        self._conflict_detector = ConflictDetector(
+            git_operator=self._git_operator,
+            p4_client=self._p4_client,
+            state_store=self._state_store,
+        )
+
+        logger.info("양방향 동기화 컴포넌트 초기화 완료")
+
+    def _get_stream_direction(self, stream: str) -> str:
+        return self._config.stream_policy.get_direction(stream)
+
+    def _get_reverse_builder(self, stream: str) -> ReverseCommitBuilder:
+        if stream not in self._reverse_builders:
+            self._reverse_builders[stream] = ReverseCommitBuilder(
+                git_operator=self._git_operator,
+                p4_submitter=self._p4_submitter,
+                state_store=self._state_store,
+                stream=stream,
+                user_mapper=self._user_mapper,
+            )
+        return self._reverse_builders[stream]
+
+    def _poll_reverse_sync(self, stream: str, branch: str) -> None:
+        """Git→P4 역방향 동기화 폴링."""
+        if self._git_change_detector is None:
+            return
+
+        direction = self._get_stream_direction(stream)
+        if direction not in ("bidirectional", "git_to_p4"):
+            return
+
+        # 충돌 상태 확인
+        conflict = self._state_store.get_conflict(branch)
+        if conflict:
+            self._check_conflict_resolved(branch, conflict)
+            return
+
+        try:
+            self._git_change_detector.fetch()
+        except Exception as e:
+            logger.error("git fetch 실패: %s", e)
+            return
+
+        new_commits = self._git_change_detector.detect_new_commits(branch)
+        if not new_commits:
+            return
+
+        # 양방향이면 충돌 검사
+        if direction == "bidirectional":
+            p4_changes = self._collect_p4_changes_with_files(stream)
+            if p4_changes:
+                conflict_info = self._conflict_detector.detect(
+                    branch, p4_changes, new_commits,
+                )
+                if conflict_info is not None:
+                    self._handle_conflict(conflict_info, stream)
+                    return
+
+        # 역방향 동기화 실행
+        reverse_builder = self._get_reverse_builder(stream)
+        for commit in new_commits:
+            try:
+                reverse_builder.sync_commit(commit, branch)
+                self._git_change_detector.update_last_processed(
+                    branch, commit["sha"],
+                )
+            except Exception as e:
+                logger.error(
+                    "Git→P4 동기화 실패: %s — %s", commit["sha"][:12], e,
+                )
+                break
+
+    def _collect_p4_changes_with_files(
+        self, stream: str,
+    ) -> list[tuple[int, list[str]]]:
+        """P4 변경사항을 파일 목록과 함께 수집."""
+        changes = self._poller.poll(stream, self._config.sync.batch_size)
+        result = []
+        for cl in changes:
+            info = self._p4_client.describe(cl)
+            # GitCommit 마커가 있으면 스킵
+            if parse_git_commit_from_description(info.description):
+                continue
+            files = [fa.depot_path for fa in info.files]
+            result.append((cl, files))
+        return result
+
+    def _handle_conflict(self, conflict_info, stream: str) -> None:
+        """충돌 처리: 충돌 branch 생성, 알림."""
+        try:
+            conflict_branch = self._conflict_detector.create_conflict_branch(
+                conflict_info, stream,
+            )
+            if self._notifier:
+                self._notifier.send_conflict_alert(
+                    branch=conflict_info.branch,
+                    conflict_branch=conflict_branch,
+                    conflict_files=conflict_info.conflict_files,
+                    p4_changelists=conflict_info.p4_changelists,
+                    git_commits=conflict_info.git_commits,
+                )
+            logger.warning(
+                "충돌 처리 완료: branch=%s, 충돌 branch=%s",
+                conflict_info.branch, conflict_branch,
+            )
+        except Exception:
+            logger.exception("충돌 branch 생성 실패")
+
+    def _check_conflict_resolved(self, branch: str, conflict: dict) -> None:
+        """충돌 branch 삭제 여부를 확인하여 해결 판정."""
+        if self._git_change_detector is None:
+            return
+
+        try:
+            self._git_change_detector.fetch()
+        except Exception:
+            return
+
+        conflict_branch = conflict["conflict_branch"]
+        if self._git_change_detector.is_conflict_resolved(conflict_branch):
+            self._state_store.resolve_conflict(branch)
+            logger.info("충돌 해결 감지: branch=%s (충돌 branch '%s' 삭제됨)", branch, conflict_branch)
+            if self._notifier:
+                self._notifier.send_info(
+                    f"충돌 해결됨: {branch} (충돌 branch '{conflict_branch}' 삭제됨)"
+                )

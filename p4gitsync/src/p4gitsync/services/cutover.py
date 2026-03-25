@@ -262,13 +262,14 @@ class CutoverManager:
         backend = self._config.git.backend
         repo_path = self._config.git.repo_path
         remote_url = self._config.git.remote_url
+        bare = self._config.git.bare
 
         if backend == "cli":
             from p4gitsync.git.git_cli_operator import GitCliOperator
-            return GitCliOperator(repo_path=repo_path, remote_url=remote_url)
+            return GitCliOperator(repo_path=repo_path, remote_url=remote_url, bare=bare)
 
         from p4gitsync.git.pygit2_git_operator import Pygit2GitOperator
-        return Pygit2GitOperator(repo_path=repo_path, remote_url=remote_url)
+        return Pygit2GitOperator(repo_path=repo_path, remote_url=remote_url, bare=bare)
 
     def _check_p4_frozen(self) -> bool:
         """P4 서버에 submit이 차단되었는지 확인.

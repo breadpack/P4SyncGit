@@ -1,0 +1,46 @@
+# P4GitSync 설정 파일 예시
+# 환경에 맞게 수정하세요.
+
+[p4]
+port = "p4server02:1666"
+user = "CODE"
+workspace = "CODE_p4gitsync.read"
+stream = "//YourDepot/main"
+submit_workspace = "CODE_p4gitsync.sync"
+submit_as_user = false                     # 공유 계정이므로 false
+
+[git]
+repo_path = "/data/git-repo"
+remote_url = ""                            # bare repo 전용이면 비워둘 것
+default_branch = "main"
+bare = true                                # 로컬 bare repo
+watch_remote = "origin"
+reverse_sync_interval_seconds = 30
+
+[state]
+db_path = "/data/state.db"
+
+[sync]
+polling_interval_seconds = 30
+batch_size = 50
+
+[logging]
+level = "INFO"
+format = "text"
+
+[api]
+enabled = true
+host = "0.0.0.0"
+port = 8080
+
+[redis]
+enabled = false                            # 단독 사용 시 비활성화
+
+[user_mapping]
+script = "/app/user_mapper.py"             # 사용자 매핑 플러그인
+
+# 양방향 동기화 설정 (필요 시 활성화)
+# [[stream_policy.sync_directions]]
+# stream = "//YourDepot/main"
+# branch = "main"
+# direction = "bidirectional"

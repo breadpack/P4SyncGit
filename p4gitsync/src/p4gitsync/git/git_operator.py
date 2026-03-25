@@ -51,3 +51,30 @@ class GitOperator(Protocol):
     def maybe_run_gc(self, gc_interval: int) -> None:
         """설정된 간격마다 git gc 실행."""
         ...
+
+    def fetch(self, remote: str = "origin") -> None:
+        """remote에서 fetch."""
+        ...
+
+    def get_log_after(self, branch: str, after_sha: str | None, remote: str = "origin") -> list[dict]:
+        """after_sha 이후의 remote branch commit 목록 반환 (오래된 순).
+
+        반환: [{"sha": str, "message": str, "author_name": str, "author_email": str, "timestamp": int, "parents": list[str]}]
+        after_sha가 None이면 전체 log.
+        """
+        ...
+
+    def get_commit_files(self, commit_sha: str) -> tuple[list[tuple[str, bytes]], list[str]]:
+        """commit의 파일 변경사항 반환.
+
+        반환: (file_changes: [(path, content)], deletes: [path])
+        """
+        ...
+
+    def delete_branch(self, branch: str) -> None:
+        """branch 삭제."""
+        ...
+
+    def list_remote_branches(self, remote: str = "origin", prefix: str = "") -> list[str]:
+        """remote branch 목록 반환. prefix 지정 시 해당 prefix로 시작하는 것만."""
+        ...

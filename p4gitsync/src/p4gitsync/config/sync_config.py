@@ -10,6 +10,7 @@ from p4gitsync.config.lfs_config import LfsConfig
 _KNOWN_SECTIONS = [
     "INITIAL_IMPORT",
     "STREAM_POLICY",
+    "USER_MAPPING",
     "LOGGING",
     "SLACK",
     "STATE",
@@ -71,6 +72,8 @@ class P4Config:
     workspace: str = ""
     stream: str = ""
     filelog_batch_size: int = 200
+    submit_workspace: str = ""
+    submit_as_user: bool = True
 
 
 @dataclass
@@ -79,6 +82,9 @@ class GitConfig:
     remote_url: str = ""
     default_branch: str = "main"
     backend: str = "pygit2"  # "pygit2" or "cli"
+    bare: bool = False
+    watch_remote: str = "origin"
+    reverse_sync_interval_seconds: int = 30
 
 
 @dataclass
@@ -154,6 +160,22 @@ class SlackConfig:
 
 
 @dataclass
+class UserMappingConfig:
+    """사용자 매핑 설정. script 경로가 지정되면 플러그인 방식 사용."""
+
+    script: str = ""  # 사용자 정의 매핑 스크립트 경로
+
+
+@dataclass
+class StreamSyncDirection:
+    """Stream별 동기화 방향 설정."""
+
+    stream: str = ""
+    branch: str = ""
+    direction: str = "p4_to_git"  # "p4_to_git" | "git_to_p4" | "bidirectional"
+
+
+@dataclass
 class StreamPolicy:
     """Stream 자동 감지 필터링 정책."""
 
@@ -162,6 +184,14 @@ class StreamPolicy:
     exclude_types: list[str] = field(default_factory=list)
     exclude_streams: list[str] = field(default_factory=list)
     task_stream_policy: str = "ignore"  # "ignore" | "include"
+    sync_directions: list[StreamSyncDirection] = field(default_factory=list)
+
+    def get_direction(self, stream: str) -> str:
+        """stream의 동기화 방향 반환. 미설정 시 'p4_to_git'."""
+        for sd in self.sync_directions:
+            if sd.stream == stream:
+                return sd.direction
+        return "p4_to_git"
 
     def should_include(self, stream: str, stream_type: str) -> bool:
         """stream이 필터링 정책에 의해 포함되어야 하는지 판단."""
@@ -184,6 +214,12 @@ class StreamPolicy:
         return True
 
 
+def _build_stream_policy(raw: dict) -> StreamPolicy:
+    directions_raw = raw.pop("sync_directions", [])
+    directions = [StreamSyncDirection(**d) for d in directions_raw]
+    return StreamPolicy(sync_directions=directions, **raw)
+
+
 @dataclass
 class AppConfig:
     p4: P4Config
@@ -197,6 +233,7 @@ class AppConfig:
     lfs: LfsConfig = field(default_factory=LfsConfig)
     stream_policy: StreamPolicy = field(default_factory=StreamPolicy)
     redis: RedisConfig = field(default_factory=RedisConfig)
+    user_mapping: UserMappingConfig = field(default_factory=UserMappingConfig)
 
     @classmethod
     def from_dict(cls, data: dict) -> "AppConfig":
@@ -210,6 +247,7 @@ class AppConfig:
             slack=SlackConfig(**data.get("slack", {})),
             api=ApiConfig(**data.get("api", {})),
             lfs=LfsConfig(**data.get("lfs", {})),
-            stream_policy=StreamPolicy(**data.get("stream_policy", {})),
+            stream_policy=_build_stream_policy(data.get("stream_policy", {})),
             redis=RedisConfig(**data.get("redis", {})),
+            user_mapping=UserMappingConfig(**data.get("user_mapping", {})),
         )

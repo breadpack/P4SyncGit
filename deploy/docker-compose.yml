@@ -1,0 +1,16 @@
+services:
+  p4gitsync:
+    build:
+      context: ../p4gitsync
+      dockerfile: Dockerfile
+    image: p4gitsync:local
+    restart: unless-stopped
+    volumes:
+      - sync-data:/data
+      - ./config.toml:/app/config.toml:ro
+      - ./user_mapper.py:/app/user_mapper.py:ro
+    ports:
+      - "8080:8080"
+
+volumes:
+  sync-data:
