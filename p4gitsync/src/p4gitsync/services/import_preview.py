@@ -631,12 +631,12 @@ body {{ font-family:'Consolas','Courier New',monospace; background:#0d1117; colo
 .legend-dot {{ width:10px; height:10px; border-radius:50%; display:inline-block; }}
 .legend-line {{ width:20px; height:2px; display:inline-block; }}
 .container {{ display:flex; height:calc(100vh - 90px); }}
-.graph-panel {{ width:320px; min-width:320px; overflow-y:auto; background:#0d1117; border-right:1px solid #30363d; }}
+.graph-panel {{ width:420px; min-width:420px; overflow-y:auto; background:#0d1117; border-right:1px solid #30363d; }}
 .detail-panel {{ flex:1; overflow-y:auto; padding:0; }}
-.row {{ display:flex; height:28px; align-items:center; cursor:pointer; padding-right:8px; }}
+.row {{ display:flex; height:30px; align-items:center; cursor:pointer; padding-right:8px; }}
 .row:hover {{ background:#161b22; }}
 .row.selected {{ background:#1c2333; }}
-.graph-cell {{ width:280px; min-width:280px; height:28px; position:relative; }}
+.graph-cell {{ width:380px; min-width:380px; height:30px; position:relative; }}
 .cl-label {{ font-size:11px; color:#8b949e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; padding-left:4px; }}
 .detail-panel .info {{ padding:16px 20px; }}
 .detail-panel .info h3 {{ color:#58a6ff; font-size:14px; margin-bottom:8px; }}
@@ -684,8 +684,8 @@ BRANCHES.forEach((b, i) => {{
   branchIndex[b.name] = i;
 }});
 
-const COL_W = 28;
-const ROW_H = 28;
+const COL_W = 40;
+const ROW_H = 30;
 const DOT_R = 5;
 const LINE_W = 2;
 
@@ -703,34 +703,49 @@ function buildLegend() {{
 
 function buildGraph() {{
   const panel = document.getElementById('graphPanel');
-  const activeBranches = new Set();
+
+  // 1단계: mainline은 처음부터 활성, 나머지는 branch_point에서 활성화
+  const mainBranch = BRANCHES.length > 0 ? BRANCHES[0].name : 'dev';
+  const activeBranches = new Set([mainBranch]);
   const rows = [];
 
+  // parent 체인을 따라 조상까지 모두 활성화
+  function activateWithAncestors(branchName) {{
+    if (activeBranches.has(branchName)) return;
+    activeBranches.add(branchName);
+    const bInfo = BRANCHES.find(b => b.name === branchName);
+    if (bInfo && bInfo.parent && !activeBranches.has(bInfo.parent)) {{
+      activateWithAncestors(bInfo.parent);
+    }}
+  }}
+
   EVENTS.forEach((ev, idx) => {{
-    if (ev.type === 'branch_point') activeBranches.add(ev.branch);
-    const active = [...activeBranches];
-    rows.push({{ ev, active: [...active], idx }});
-    if (ev.type === 'branch_point') {{}} // already added
+    if (ev.type === 'branch_point') {{
+      activateWithAncestors(ev.branch);
+    }}
+    if (ev.type !== 'branch_point' && !activeBranches.has(ev.branch)) {{
+      activateWithAncestors(ev.branch);
+    }}
+    // merge/cherry-pick의 source branch도 활성화
+    if (ev.source_branch && !activeBranches.has(ev.source_branch)) {{
+      activateWithAncestors(ev.source_branch);
+    }}
+    rows.push({{ ev, active: new Set(activeBranches), idx }});
   }});
 
-  // Ensure main branch is always active
-  if (BRANCHES.length > 0) activeBranches.add(BRANCHES[0].name);
-
+  // 2단계: 활성 branch만 컬럼 할당 (동적)
   const svgW = BRANCHES.length * COL_W + 20;
-  const svgH = rows.length * ROW_H;
 
   rows.forEach((row, ri) => {{
     const ev = row.ev;
     const col = branchIndex[ev.branch] ?? 0;
     const color = branchColor[ev.branch] || '#484f58';
 
-    // Create row element
     const rowEl = document.createElement('div');
     rowEl.className = 'row';
     rowEl.dataset.idx = ri;
     rowEl.onclick = () => showDetail(ev);
 
-    // SVG for graph
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('width', svgW);
     svg.setAttribute('height', ROW_H);
@@ -740,49 +755,76 @@ function buildGraph() {{
     graphCell.className = 'graph-cell';
     graphCell.style.width = svgW + 'px';
 
-    // Draw vertical lines for active branches
+    // 세로 라인: 이 행 시점에 활성화된 branch만
     row.active.forEach(bname => {{
-      const bi = branchIndex[bname] ?? 0;
+      const bi = branchIndex[bname];
+      if (bi === undefined) return;
       const x = bi * COL_W + COL_W / 2;
       const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
       line.setAttribute('x1', x); line.setAttribute('y1', 0);
       line.setAttribute('x2', x); line.setAttribute('y2', ROW_H);
       line.setAttribute('stroke', branchColor[bname] || '#30363d');
       line.setAttribute('stroke-width', LINE_W);
-      line.setAttribute('opacity', '0.4');
+      line.setAttribute('opacity', '0.35');
       svg.appendChild(line);
     }});
 
     const cx = col * COL_W + COL_W / 2;
     const cy = ROW_H / 2;
 
-    // Merge/cherry-pick connection line
-    if ((ev.type === 'merge' || ev.type === 'cherry_pick') && ev.source_branch) {{
-      const srcCol = branchIndex[ev.source_branch] ?? col;
-      const sx = srcCol * COL_W + COL_W / 2;
-      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      const midX = (sx + cx) / 2;
-      path.setAttribute('d', `M${{sx}},${{0}} C${{sx}},${{cy}} ${{cx}},${{cy * 0.3}} ${{cx}},${{cy}}`);
-      path.setAttribute('stroke', ev.type === 'cherry_pick' ? '#d29922' : color);
-      path.setAttribute('stroke-width', LINE_W);
-      path.setAttribute('fill', 'none');
-      if (ev.type === 'cherry_pick') path.setAttribute('stroke-dasharray', '4,3');
-      svg.appendChild(path);
+    // branch_point: parent에서 child로 분기선
+    if (ev.type === 'branch_point') {{
+      const parentBranch = BRANCHES.find(b => b.name === ev.branch);
+      if (parentBranch && parentBranch.parent) {{
+        const parentCol = branchIndex[parentBranch.parent];
+        if (parentCol !== undefined) {{
+          const px = parentCol * COL_W + COL_W / 2;
+          const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+          path.setAttribute('d', `M${{px}},${{0}} Q${{px}},${{cy}} ${{cx}},${{cy}}`);
+          path.setAttribute('stroke', color);
+          path.setAttribute('stroke-width', LINE_W + 1);
+          path.setAttribute('fill', 'none');
+          svg.appendChild(path);
+        }}
+      }}
     }}
 
-    // Commit dot
+    // merge/cherry-pick: source branch에서 target으로 곡선
+    if ((ev.type === 'merge' || ev.type === 'cherry_pick') && ev.source_branch) {{
+      const srcCol = branchIndex[ev.source_branch];
+      if (srcCol !== undefined && row.active.has(ev.source_branch)) {{
+        const sx = srcCol * COL_W + COL_W / 2;
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        // 왼쪽→오른쪽 또는 오른쪽→왼쪽 방향에 따라 곡선 조정
+        const dir = sx < cx ? 1 : -1;
+        const ctrl1x = sx;
+        const ctrl1y = cy;
+        const ctrl2x = cx - dir * Math.min(Math.abs(cx - sx) * 0.3, 15);
+        const ctrl2y = cy * 0.3;
+        path.setAttribute('d', `M${{sx}},0 C${{ctrl1x}},${{ctrl1y}} ${{ctrl2x}},${{ctrl2y}} ${{cx}},${{cy}}`);
+        path.setAttribute('stroke', ev.type === 'cherry_pick' ? '#d29922' : color);
+        path.setAttribute('stroke-width', LINE_W);
+        path.setAttribute('fill', 'none');
+        if (ev.type === 'cherry_pick') path.setAttribute('stroke-dasharray', '4,3');
+        svg.appendChild(path);
+      }}
+    }}
+
+    // commit dot (최상위 레이어)
     const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
     circle.setAttribute('cx', cx); circle.setAttribute('cy', cy);
-    circle.setAttribute('r', ev.type === 'branch_point' ? DOT_R + 2 : DOT_R);
-    if (ev.type === 'cherry_pick') {{
+    if (ev.type === 'branch_point') {{
+      circle.setAttribute('r', DOT_R + 2);
+      circle.setAttribute('fill', '#0d1117');
+      circle.setAttribute('stroke', color);
+      circle.setAttribute('stroke-width', '2.5');
+    }} else if (ev.type === 'cherry_pick') {{
+      circle.setAttribute('r', DOT_R);
       circle.setAttribute('fill', '#0d1117');
       circle.setAttribute('stroke', '#d29922');
       circle.setAttribute('stroke-width', '2');
-    }} else if (ev.type === 'branch_point') {{
-      circle.setAttribute('fill', '#0d1117');
-      circle.setAttribute('stroke', color);
-      circle.setAttribute('stroke-width', '2');
     }} else {{
+      circle.setAttribute('r', DOT_R);
       circle.setAttribute('fill', color);
     }}
     svg.appendChild(circle);
