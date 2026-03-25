@@ -46,6 +46,10 @@ def _build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument(
         "--stream", help="P4 stream 경로 (미지정 시 설정 파일의 p4.stream 사용)",
     )
+    import_parser.add_argument(
+        "--streams", nargs="+",
+        help="다중 stream import (branch 관계 보존). 예: //depot/main //depot/develop",
+    )
 
     subparsers.add_parser(
         "rebuild-state", help="Git log에서 State DB 재구성",
@@ -94,12 +98,9 @@ def _run_sync(config: AppConfig) -> None:
         orchestrator.start()
 
 
-def _run_import(config: AppConfig, stream: str | None) -> None:
+def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None = None) -> None:
     from p4gitsync.p4.p4_client import P4Client
-    from p4gitsync.services.initial_importer import InitialImporter
     from p4gitsync.state.state_store import StateStore
-
-    p4_stream = stream or config.p4.stream
 
     state_store = StateStore(config.state.db_path)
     state_store.initialize()
@@ -112,15 +113,35 @@ def _run_import(config: AppConfig, stream: str | None) -> None:
     p4_client.connect()
 
     try:
-        importer = InitialImporter(
-            p4_client=p4_client,
-            state_store=state_store,
-            repo_path=config.git.repo_path,
-            stream=p4_stream,
-            config=config.initial_import,
-            lfs_config=config.lfs if config.lfs.enabled else None,
-        )
-        importer.run(config.git.default_branch)
+        if streams:
+            # 다중 stream import (branch 관계 보존)
+            from p4gitsync.services.multi_stream_importer import MultiStreamImporter
+            from p4gitsync.services.user_mapper import UserMapper
+
+            user_mapper = UserMapper(config=config.user_mapping, state_store=state_store)
+            importer = MultiStreamImporter(
+                p4_client=p4_client,
+                state_store=state_store,
+                repo_path=config.git.repo_path,
+                config=config.initial_import,
+                lfs_config=config.lfs if config.lfs.enabled else None,
+                user_mapper=user_mapper,
+            )
+            importer.run(streams, config.git.default_branch)
+        else:
+            # 단일 stream import (기존 동작)
+            from p4gitsync.services.initial_importer import InitialImporter
+
+            p4_stream = stream or config.p4.stream
+            importer = InitialImporter(
+                p4_client=p4_client,
+                state_store=state_store,
+                repo_path=config.git.repo_path,
+                stream=p4_stream,
+                config=config.initial_import,
+                lfs_config=config.lfs if config.lfs.enabled else None,
+            )
+            importer.run(config.git.default_branch)
     finally:
         p4_client.disconnect()
         state_store.close()
@@ -182,7 +203,7 @@ def main() -> None:
     command = args.command or "run"
 
     if command == "import":
-        _run_import(config, args.stream)
+        _run_import(config, args.stream, getattr(args, "streams", None))
     elif command == "rebuild-state":
         _run_rebuild_state(config)
     elif command == "resync":
