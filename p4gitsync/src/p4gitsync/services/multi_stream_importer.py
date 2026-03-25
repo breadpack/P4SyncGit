@@ -6,8 +6,9 @@ from dataclasses import dataclass, field
 
 from p4gitsync.config.lfs_config import LfsConfig
 from p4gitsync.config.sync_config import InitialImportConfig
-from p4gitsync.git.commit_metadata import CommitMetadata
+from p4gitsync.git.commit_metadata import CommitMetadata, IntegrationCommitInfo
 from p4gitsync.git.fast_importer import FastImporter
+from p4gitsync.p4.merge_analyzer import MergeAnalyzer
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.p4.p4_file_action import ADD_EDIT_ACTIONS, DELETE_ACTIONS
@@ -51,11 +52,17 @@ class MultiStreamImporter:
         self._repo_path = repo_path
         self._lfs = lfs_config
         self._user_mapper = user_mapper
+        self._merge_analyzer = MergeAnalyzer(p4_client)
 
         cfg = config or InitialImportConfig()
         self._checkpoint_interval = cfg.checkpoint_interval
         self._server_load_threshold = 50
         self._throttle_wait_seconds = 60
+
+        # CL → fast-import mark 매핑 (전 stream 공유, merge commit용)
+        self._cl_to_mark: dict[int, int] = {}
+        # stream → branch 매핑
+        self._stream_branch_map: dict[str, str] = {}
 
     def run(self, streams: list[str], default_branch: str = "main") -> None:
         """다중 stream import 실행.
@@ -74,7 +81,11 @@ class MultiStreamImporter:
             [n.branch for n in import_order],
         )
 
-        # 2. 순서대로 import
+        # 2. stream→branch 매핑 구성 (merge commit에서 source branch 참조용)
+        for node in import_order:
+            self._stream_branch_map[node.stream] = node.branch
+
+        # 3. 순서대로 import
         for node in import_order:
             self._import_stream(node)
 
@@ -227,14 +238,58 @@ class MultiStreamImporter:
                 else:
                     name, email = self._state.get_git_author(info.user)
 
+                # merge 분석
+                merge_info = None
+                try:
+                    merge_info = self._merge_analyzer.analyze(info)
+                except Exception:
+                    pass
+
+                integration_info = None
+                if merge_info and merge_info.has_integration:
+                    integration_info = IntegrationCommitInfo(
+                        source_stream=merge_info.primary_source_stream,
+                        target_stream=node.stream,
+                        source_changelist=merge_info.source_changelist,
+                        integrated_files=len(merge_info.records),
+                    )
+
                 metadata = CommitMetadata(
                     author_name=name,
                     author_email=email,
                     author_timestamp=info.timestamp,
                     message=info.description,
                     p4_changelist=cl,
+                    integration_info=integration_info,
                 )
-                mark = fast_importer.add_commit(node.branch, metadata, files, deletes)
+
+                # merge commit 여부 결정
+                merge_from_mark = None
+                merge_from_ref = None
+                if merge_info and merge_info.has_integration and merge_info.source_changelist:
+                    # source CL의 fast-import mark 찾기
+                    merge_from_mark = self._cl_to_mark.get(merge_info.source_changelist)
+                    if merge_from_mark is None:
+                        # mark가 없으면 source branch ref로 시도
+                        source_branch = self._stream_branch_map.get(
+                            merge_info.primary_source_stream,
+                        )
+                        if source_branch:
+                            merge_from_ref = f"refs/heads/{source_branch}"
+
+                if merge_from_mark or merge_from_ref:
+                    mark = fast_importer.add_merge_commit(
+                        node.branch, merge_from_mark, merge_from_ref,
+                        metadata, files, deletes,
+                    )
+                    logger.info(
+                        "CL %d → merge commit (%s → %s)",
+                        cl, merge_info.primary_source_stream, node.stream,
+                    )
+                else:
+                    mark = fast_importer.add_commit(node.branch, metadata, files, deletes)
+
+                self._cl_to_mark[cl] = mark
 
                 if (i + 1) % self._checkpoint_interval == 0:
                     fast_importer.checkpoint()
