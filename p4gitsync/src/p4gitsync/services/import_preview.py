@@ -484,3 +484,188 @@ class ImportPreview:
             lines.append("")
 
         return lines
+
+    def format_html(
+        self,
+        summaries: list[BranchSummary],
+        events: list[PreviewEvent],
+        depot: str = "",
+        server: str = "",
+    ) -> str:
+        """시각적 HTML 리포트 생성 (Mermaid gitGraph 포함)."""
+        merges = [e for e in events if e.event_type == "merge"]
+        cherry_picks = [e for e in events if e.event_type == "cherry_pick"]
+        branch_points = [e for e in events if e.event_type == "branch_point"]
+        total_cls = sum(s.total_cls for s in summaries)
+
+        git_graph = self._build_mermaid_git_graph(summaries, events)
+        flow_chart = self._build_mermaid_flow_chart(summaries)
+        merge_flow = self._build_mermaid_merge_flow(summaries, merges, cherry_picks)
+
+        rows_html = ""
+        colors = ["#1b5e20","#0d47a1","#b71c1c","#e65100","#4a148c","#006064","#880e4f","#33691e","#f57f17"]
+        for i, s in enumerate(summaries):
+            c = colors[i % len(colors)]
+            cp = sum(1 for m in s.merges if m.event_type == "cherry_pick")
+            mg = sum(1 for m in s.merges if m.event_type == "merge")
+            cl_range = f"CL {s.first_cl:,}~{s.last_cl:,}" if s.first_cl else "-"
+            bp = f"CL {s.branch_point_cl:,}" if s.branch_point_cl else "-"
+            rows_html += (
+                f'<tr><td style="color:{c};font-weight:bold">{s.branch}</td>'
+                f"<td>{s.stream}</td><td>{s.total_cls:,}</td><td>{cl_range}</td>"
+                f"<td>{mg}</td><td>{cp}</td><td>{bp}</td><td>{s.parent_branch or '-'}</td></tr>\n"
+            )
+
+        return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>P4GitSync Import Preview</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+body {{ font-family:'Segoe UI',sans-serif; background:#1a1a2e; color:#e0e0e0; padding:20px; max-width:1400px; margin:auto; }}
+h1 {{ color:#00d4ff; }} h2 {{ color:#7ec8e3; margin-top:2em; }}
+.mermaid {{ background:#16213e; border-radius:12px; padding:20px; margin:20px 0; overflow-x:auto; }}
+table {{ border-collapse:collapse; width:100%; margin:20px 0; }}
+th {{ background:#16213e; color:#00d4ff; padding:10px; text-align:left; }}
+td {{ padding:8px 10px; border-bottom:1px solid #2a2a4a; }}
+tr:hover {{ background:#16213e; }}
+.stat {{ display:inline-block; background:#16213e; border-radius:8px; padding:8px 16px; margin:4px; }}
+.stat-num {{ font-size:1.5em; color:#00d4ff; font-weight:bold; }}
+.stat-label {{ font-size:0.85em; color:#888; }}
+</style>
+</head>
+<body>
+<h1>P4GitSync Import Preview</h1>
+<p>Server: {server} | Depot: {depot}</p>
+<div style="margin:20px 0;">
+  <span class="stat"><span class="stat-num">{len(summaries)}</span><br><span class="stat-label">Branches</span></span>
+  <span class="stat"><span class="stat-num">{total_cls:,}</span><br><span class="stat-label">Changelists</span></span>
+  <span class="stat"><span class="stat-num">{len(merges)}</span><br><span class="stat-label">Merges</span></span>
+  <span class="stat"><span class="stat-num">{len(cherry_picks)}</span><br><span class="stat-label">Cherry-picks</span></span>
+  <span class="stat"><span class="stat-num">{len(branch_points)}</span><br><span class="stat-label">Branch Points</span></span>
+</div>
+<h2>Git Commit Tree</h2>
+<pre class="mermaid">
+{git_graph}
+</pre>
+<h2>Branch Hierarchy</h2>
+<pre class="mermaid">
+{flow_chart}
+</pre>
+<h2>Merge / Cherry-pick Flow</h2>
+<pre class="mermaid">
+{merge_flow}
+</pre>
+<h2>Branch Summary</h2>
+<table>
+<tr><th>Branch</th><th>Stream</th><th>CL</th><th>Range</th><th>Merge</th><th>CP</th><th>Branch Point</th><th>Parent</th></tr>
+{rows_html}
+</table>
+<script>
+mermaid.initialize({{ startOnLoad:true, theme:'dark', gitGraph:{{ mainBranchName:'{summaries[0].branch if summaries else "dev"}', showCommitLabel:true, rotateCommitLabel:true }}, flowchart:{{ curve:'basis', htmlLabels:true }} }});
+</script>
+</body>
+</html>"""
+
+    def _build_mermaid_git_graph(
+        self, summaries: list[BranchSummary], events: list[PreviewEvent],
+    ) -> str:
+        """Mermaid gitGraph 문법 생성."""
+        lines = ["gitGraph"]
+        branch_order = [s.branch for s in summaries]
+        main_branch = branch_order[0] if branch_order else "dev"
+
+        sorted_events = sorted(events, key=lambda e: e.cl)
+        created_branches = {main_branch}
+        last_branch = main_branch
+
+        for e in sorted_events:
+            if e.event_type in ("first_commit", "last_commit"):
+                continue
+
+            if e.event_type == "branch_point":
+                if e.branch in created_branches:
+                    continue
+                parent = None
+                for s in summaries:
+                    if s.branch == e.branch:
+                        parent = s.parent_branch
+                        break
+                if parent and parent != last_branch:
+                    lines.append(f"  checkout {parent}")
+                    last_branch = parent
+                lines.append(f"  branch {e.branch}")
+                created_branches.add(e.branch)
+                last_branch = e.branch
+
+            elif e.event_type == "merge":
+                if e.branch not in created_branches:
+                    continue
+                if e.branch != last_branch:
+                    lines.append(f"  checkout {e.branch}")
+                    last_branch = e.branch
+                source_branch = None
+                if e.merge_source:
+                    src_name = e.merge_source.split("/")[-1]
+                    if src_name in created_branches:
+                        source_branch = src_name
+                if source_branch:
+                    lines.append(f'  merge {source_branch} id: "CL{e.cl}"')
+                else:
+                    lines.append(f'  commit id: "CL{e.cl}-mg"')
+
+            elif e.event_type == "cherry_pick":
+                if e.branch not in created_branches:
+                    continue
+                if e.branch != last_branch:
+                    lines.append(f"  checkout {e.branch}")
+                    last_branch = e.branch
+                src_cl = e.merge_source_cl or "?"
+                lines.append(f'  commit id: "CL{e.cl}cp{src_cl}" type: HIGHLIGHT')
+
+        return "\n".join(lines)
+
+    def _build_mermaid_flow_chart(self, summaries: list[BranchSummary]) -> str:
+        """Branch hierarchy flow chart."""
+        lines = ["graph TD"]
+        for s in summaries:
+            cp = sum(1 for m in s.merges if m.event_type == "cherry_pick")
+            mg = sum(1 for m in s.merges if m.event_type == "merge")
+            label = f"<b>{s.branch}</b><br/>{s.total_cls:,} CL"
+            if mg or cp:
+                label += f"<br/>{mg}M + {cp}CP"
+            lines.append(f'  {s.branch}["{label}"]')
+        for s in summaries:
+            if s.parent_branch:
+                bp = f"CL {s.branch_point_cl}" if s.branch_point_cl else ""
+                lines.append(f'  {s.parent_branch} -->|"{bp}"| {s.branch}')
+        return "\n".join(lines)
+
+    def _build_mermaid_merge_flow(
+        self, summaries: list[BranchSummary],
+        merges: list[PreviewEvent], cherry_picks: list[PreviewEvent],
+    ) -> str:
+        """Merge/cherry-pick flow diagram."""
+        lines = ["graph LR"]
+        flows: dict[tuple[str, str, str], int] = {}
+        for e in merges:
+            src = e.merge_source.split("/")[-1] if e.merge_source else "unknown"
+            flows[(src, e.branch, "merge")] = flows.get((src, e.branch, "merge"), 0) + 1
+        for e in cherry_picks:
+            src = e.merge_source.split("/")[-1] if e.merge_source else "unknown"
+            flows[(src, e.branch, "cp")] = flows.get((src, e.branch, "cp"), 0) + 1
+
+        all_nodes = set()
+        for (src, tgt, _) in flows:
+            all_nodes.add(src)
+            all_nodes.add(tgt)
+        for n in sorted(all_nodes):
+            lines.append(f'  {n}["{n}"]')
+
+        for (src, tgt, ftype), count in sorted(flows.items()):
+            if ftype == "merge":
+                lines.append(f'  {src} -->|"{count} merge"| {tgt}')
+            else:
+                lines.append(f'  {src} -.->|"{count} cp"| {tgt}')
+        return "\n".join(lines)
