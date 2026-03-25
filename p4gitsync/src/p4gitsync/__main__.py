@@ -77,6 +77,9 @@ def _build_parser() -> argparse.ArgumentParser:
     tree_parser.add_argument(
         "--include-deleted", action="store_true", help="삭제된 stream 포함",
     )
+    tree_parser.add_argument(
+        "--include-virtual", action="store_true", help="virtual stream 포함",
+    )
 
     return parser
 
@@ -201,7 +204,7 @@ def _run_cutover(config: AppConfig, dry_run: bool) -> None:
         sys.exit(1)
 
 
-def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool) -> None:
+def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool, include_virtual: bool = False) -> None:
     from p4gitsync.p4.p4_client import P4Client
     from p4gitsync.services.stream_tree_viewer import StreamTreeViewer
 
@@ -226,6 +229,7 @@ def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool) -> No
             p4_depot,
             default_branch=config.git.default_branch,
             include_deleted=include_deleted,
+            include_virtual=include_virtual,
         )
 
         if not roots:
@@ -260,7 +264,7 @@ def main() -> None:
     elif command == "cutover":
         _run_cutover(config, args.dry_run)
     elif command == "tree":
-        _run_tree(config, args.depot, args.include_deleted)
+        _run_tree(config, args.depot, args.include_deleted, args.include_virtual)
     else:
         _run_sync(config)
 
