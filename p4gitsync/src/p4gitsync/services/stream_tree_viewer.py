@@ -36,6 +36,7 @@ class StreamTreeViewer:
         depot: str,
         default_branch: str = "main",
         include_deleted: bool = False,
+        include_virtual: bool = False,
     ) -> list[StreamInfo]:
         """depot의 전체 stream 트리를 구성한다.
 
@@ -43,6 +44,7 @@ class StreamTreeViewer:
             depot: P4 depot 경로 (예: "//depot")
             default_branch: mainline의 Git branch 이름
             include_deleted: 삭제된 stream 포함 여부
+            include_virtual: virtual stream 포함 여부
 
         Returns:
             root StreamInfo 목록 (트리 구조)
@@ -62,6 +64,10 @@ class StreamTreeViewer:
             # 삭제 여부 확인
             is_deleted = stream_type == "deleted"
             if is_deleted and not include_deleted:
+                continue
+
+            # virtual stream 제외
+            if stream_type == "virtual" and not include_virtual:
                 continue
 
             branch = self._stream_to_branch(
@@ -99,11 +105,23 @@ class StreamTreeViewer:
             nodes[stream_path] = info
 
         # parent-child 관계 연결
+        # virtual parent가 제외된 경우 조상 체인을 따라 올라감
+        all_raw = {r.get("Stream", ""): r for r in raw_streams}
         roots = []
         for node in nodes.values():
-            if node.parent and node.parent in nodes:
-                nodes[node.parent].children.append(node)
-            else:
+            attached = False
+            ancestor = node.parent
+            while ancestor:
+                if ancestor in nodes:
+                    nodes[ancestor].children.append(node)
+                    attached = True
+                    break
+                # 제외된 parent의 parent를 따라감
+                raw = all_raw.get(ancestor, {})
+                ancestor = raw.get("Parent", "none")
+                if ancestor == "none":
+                    ancestor = None
+            if not attached:
                 roots.append(node)
 
         # children을 이름순 정렬
