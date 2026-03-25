@@ -113,6 +113,7 @@ class P4Client:
             description=desc["desc"],
             timestamp=int(desc["time"]),
             files=files,
+            workspace=desc.get("client", ""),
         )
 
     @_auto_reconnect
@@ -263,3 +264,73 @@ class P4Client:
             email = u.get("Email", f"{p4_user}@{company_domain}")
             mappings.append((p4_user, full_name, email))
         return mappings
+
+    # ── Git→P4 역방향 동기화용 쓰기 메서드 ──────────────────────────
+
+    @_auto_reconnect
+    def create_changelist(self, description: str, user: str | None = None) -> int:
+        """새 pending changelist 생성. changelist 번호 반환."""
+        change_spec = self._p4.fetch_change()
+        change_spec["Description"] = description
+        if user:
+            change_spec["User"] = user
+        result = self._p4.save_change(change_spec)
+        # result: ["Change 12345 created."]
+        cl_str = result[0].split()[1]
+        return int(cl_str)
+
+    @_auto_reconnect
+    def p4_add(self, file_path: str, changelist: int) -> None:
+        """파일을 changelist에 add."""
+        self._p4.run_add("-c", str(changelist), file_path)
+
+    @_auto_reconnect
+    def p4_edit(self, file_path: str, changelist: int) -> None:
+        """파일을 changelist에 edit (checkout)."""
+        self._p4.run_edit("-c", str(changelist), file_path)
+
+    @_auto_reconnect
+    def p4_delete(self, file_path: str, changelist: int) -> None:
+        """파일을 changelist에 delete."""
+        self._p4.run_delete("-c", str(changelist), file_path)
+
+    @_auto_reconnect
+    def submit_changelist(self, changelist: int) -> int:
+        """pending changelist를 submit. 최종 CL 번호 반환."""
+        result = self._p4.run_submit("-c", str(changelist))
+        # submit 결과에서 submittedChange 추출
+        for item in result:
+            if isinstance(item, dict) and "submittedChange" in item:
+                return int(item["submittedChange"])
+        raise RuntimeError(f"submit 결과에서 CL 번호를 찾을 수 없음: {result}")
+
+    @_auto_reconnect
+    def revert_changelist(self, changelist: int) -> None:
+        """changelist의 모든 파일을 revert."""
+        try:
+            self._p4.run_revert("-c", str(changelist), "//...")
+        except P4Exception:
+            pass  # 파일이 없으면 무시
+
+    @_auto_reconnect
+    def delete_changelist(self, changelist: int) -> None:
+        """빈 pending changelist 삭제."""
+        try:
+            self._p4.run_change("-d", str(changelist))
+        except P4Exception:
+            pass  # 이미 삭제됐거나 파일이 남아있으면 무시
+
+    def get_workspace_root(self, workspace: str | None = None) -> str:
+        """workspace의 root 경로 반환."""
+        ws = workspace or self._p4.client
+        client_spec = self._p4.fetch_client(ws)
+        return client_spec.get("Root", "")
+
+    @_auto_reconnect
+    def file_exists(self, depot_path: str) -> bool:
+        """depot에 파일이 존재하는지 확인."""
+        try:
+            result = self._p4.run_fstat(depot_path)
+            return len(result) > 0
+        except P4Exception:
+            return False

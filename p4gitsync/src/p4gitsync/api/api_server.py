@@ -84,6 +84,7 @@ class ApiServer:
         self._register_errors_route()
         self._register_cutover_readiness_route()
         self._register_retry_route()
+        self._register_conflicts_route()
 
     def _register_trigger_route(self) -> None:
         @self.app.post("/api/trigger", status_code=202)
@@ -277,6 +278,13 @@ class ApiServer:
             blockers.append("동기화 기록 없음")
 
         return blockers, metrics
+
+    def _register_conflicts_route(self) -> None:
+        @self.app.get("/api/conflicts")
+        async def conflicts() -> list[dict]:
+            if not self._state_store:
+                return []
+            return self._state_store.get_all_conflicts()
 
     def start_in_thread(self) -> None:
         import uvicorn

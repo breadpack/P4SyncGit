@@ -10,3 +10,4 @@ class P4ChangeInfo:
     description: str
     timestamp: int
     files: list[P4FileAction] = field(default_factory=list)
+    workspace: str = ""

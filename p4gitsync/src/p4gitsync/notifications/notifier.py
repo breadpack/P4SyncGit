@@ -129,6 +129,29 @@ class SlackNotifier:
         )
         self._send_to_channel("alerts", message, f"connection:{service}")
 
+    def send_conflict_alert(
+        self,
+        branch: str,
+        conflict_branch: str,
+        conflict_files: list[str],
+        p4_changelists: list[int],
+        git_commits: list[str],
+    ) -> None:
+        """양방향 동기화 충돌을 ERROR로 전송."""
+        files_str = "\n".join(f"  - {f}" for f in conflict_files[:20])
+        if len(conflict_files) > 20:
+            files_str += f"\n  ... 외 {len(conflict_files) - 20}개"
+        message = (
+            f":collision: 양방향 동기화 충돌 감지\n"
+            f"Branch: {branch}\n"
+            f"충돌 branch: `{conflict_branch}`\n"
+            f"P4 CL: {p4_changelists}\n"
+            f"Git commits: {[s[:12] for s in git_commits]}\n"
+            f"충돌 파일:\n```{files_str}```\n"
+            f"해결 방법: Git에서 `{conflict_branch}`를 merge 후 삭제하세요."
+        )
+        self._send_to_channel("alerts", message, f"conflict:{branch}")
+
     def _send_to_channel(
         self, channel_key: str, text: str, dedup_key: str = ""
     ) -> None:

@@ -30,6 +30,7 @@ class CommitBuilder:
         lfs_config: LfsConfig | None = None,
         merge_analyzer: MergeAnalyzer | None = None,
         batch_print_threshold: int = 50,
+        user_mapper=None,
     ) -> None:
         self._p4 = p4_client
         self._git = git_operator
@@ -43,6 +44,7 @@ class CommitBuilder:
         self._merge_analyzer = merge_analyzer
         self._last_has_integration = False
         self._lfs_initialized = False
+        self._user_mapper = user_mapper
 
     @property
     def last_has_integration(self) -> bool:
@@ -62,7 +64,16 @@ class CommitBuilder:
         integration_info = self._build_integration_info(merge_info)
         self._last_has_integration = merge_info is not None and merge_info.has_integration
 
-        name, email = self._state.get_git_author(info.user)
+        if self._user_mapper:
+            author = self._user_mapper.p4_to_git({
+                "user": info.user,
+                "workspace": info.workspace,
+                "description": info.description,
+                "changelist": info.changelist,
+            })
+            name, email = author["name"], author["email"]
+        else:
+            name, email = self._state.get_git_author(info.user)
         metadata = CommitMetadata(
             author_name=name,
             author_email=email,

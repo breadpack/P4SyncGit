@@ -1,3 +1,4 @@
+import json
 import logging
 import sqlite3
 import time
@@ -63,6 +64,21 @@ CREATE TABLE IF NOT EXISTS cl_commit_map_archive (
     archived_at     TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (changelist, stream)
 );
+
+CREATE TABLE IF NOT EXISTS conflict_state (
+    branch          TEXT PRIMARY KEY,
+    conflict_branch TEXT NOT NULL,
+    p4_changelists  TEXT NOT NULL,
+    git_commits     TEXT NOT NULL,
+    conflict_files  TEXT NOT NULL,
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS reverse_sync_state (
+    branch          TEXT PRIMARY KEY,
+    last_commit_sha TEXT NOT NULL,
+    updated_at      TEXT DEFAULT (datetime('now'))
+);
 """
 
 
@@ -94,6 +110,16 @@ class StateStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(_SCHEMA_SQL)
         self._conn.commit()
+
+        # sync_direction 컬럼 마이그레이션
+        try:
+            self._conn.execute("SELECT sync_direction FROM cl_commit_map LIMIT 1")
+        except sqlite3.OperationalError:
+            self._conn.execute(
+                "ALTER TABLE cl_commit_map ADD COLUMN sync_direction TEXT DEFAULT 'p4_to_git'"
+            )
+            self._conn.commit()
+
         logger.info("StateStore 초기화 완료: %s", self._db_path)
 
     @contextmanager
@@ -157,14 +183,16 @@ class StateStore:
         stream: str,
         branch: str,
         has_integration: bool = False,
+        sync_direction: str = "p4_to_git",
     ) -> None:
         self._conn.execute(
-            """INSERT INTO cl_commit_map (changelist, commit_sha, stream, branch, has_integration)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO cl_commit_map (changelist, commit_sha, stream, branch, has_integration, sync_direction)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(changelist, stream) DO UPDATE SET
                    commit_sha = excluded.commit_sha,
-                   has_integration = excluded.has_integration""",
-            (cl, sha, stream, branch, int(has_integration)),
+                   has_integration = excluded.has_integration,
+                   sync_direction = excluded.sync_direction""",
+            (cl, sha, stream, branch, int(has_integration), sync_direction),
         )
         self._auto_commit()
 
@@ -379,6 +407,88 @@ class StateStore:
             self._auto_commit()
             logger.info("cl_commit_map %d건 아카이브 (보존: %d일)", archived, retention_days)
         return archived
+
+    def get_last_reverse_sync_sha(self, branch: str) -> str | None:
+        """역방향 동기화의 마지막 처리 commit SHA."""
+        row = self._conn.execute(
+            "SELECT last_commit_sha FROM reverse_sync_state WHERE branch = ?", (branch,)
+        ).fetchone()
+        return row["last_commit_sha"] if row else None
+
+    def set_last_reverse_sync_sha(self, branch: str, commit_sha: str) -> None:
+        self._conn.execute(
+            """INSERT INTO reverse_sync_state (branch, last_commit_sha)
+               VALUES (?, ?)
+               ON CONFLICT(branch) DO UPDATE SET
+                   last_commit_sha = excluded.last_commit_sha,
+                   updated_at = datetime('now')""",
+            (branch, commit_sha),
+        )
+        self._auto_commit()
+
+    def record_conflict(self, branch: str, conflict_branch: str,
+                        p4_changelists: list[int], git_commits: list[str],
+                        conflict_files: list[str]) -> None:
+        self._conn.execute(
+            """INSERT INTO conflict_state (branch, conflict_branch, p4_changelists, git_commits, conflict_files)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(branch) DO UPDATE SET
+                   conflict_branch = excluded.conflict_branch,
+                   p4_changelists = excluded.p4_changelists,
+                   git_commits = excluded.git_commits,
+                   conflict_files = excluded.conflict_files,
+                   created_at = datetime('now')""",
+            (branch, conflict_branch, json.dumps(p4_changelists), json.dumps(git_commits), json.dumps(conflict_files)),
+        )
+        self._auto_commit()
+
+    def get_conflict(self, branch: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM conflict_state WHERE branch = ?", (branch,)
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "branch": row["branch"],
+            "conflict_branch": row["conflict_branch"],
+            "p4_changelists": json.loads(row["p4_changelists"]),
+            "git_commits": json.loads(row["git_commits"]),
+            "conflict_files": json.loads(row["conflict_files"]),
+            "created_at": row["created_at"],
+        }
+
+    def get_all_conflicts(self) -> list[dict]:
+        rows = self._conn.execute("SELECT * FROM conflict_state").fetchall()
+        return [
+            {
+                "branch": r["branch"],
+                "conflict_branch": r["conflict_branch"],
+                "p4_changelists": json.loads(r["p4_changelists"]),
+                "git_commits": json.loads(r["git_commits"]),
+                "conflict_files": json.loads(r["conflict_files"]),
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+    def resolve_conflict(self, branch: str) -> None:
+        self._conn.execute("DELETE FROM conflict_state WHERE branch = ?", (branch,))
+        self._auto_commit()
+
+    def get_p4_user(self, git_email: str) -> str | None:
+        """Git email -> P4 사용자 역매핑."""
+        row = self._conn.execute(
+            "SELECT p4_user FROM user_mappings WHERE git_email = ?", (git_email,)
+        ).fetchone()
+        return row["p4_user"] if row else None
+
+    def get_commit_sha_by_sha(self, commit_sha: str) -> dict | None:
+        """commit SHA로 매핑 조회."""
+        row = self._conn.execute(
+            "SELECT changelist, stream, branch, sync_direction FROM cl_commit_map WHERE commit_sha = ?",
+            (commit_sha,),
+        ).fetchone()
+        return dict(row) if row else None
 
     def close(self) -> None:
         if self._conn:

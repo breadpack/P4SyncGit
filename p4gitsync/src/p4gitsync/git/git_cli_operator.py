@@ -12,9 +12,10 @@ logger = logging.getLogger("p4gitsync.git.cli")
 class GitCliOperator:
     """Git CLI 기반 구현 (pygit2 호환성 문제 시 동등한 대안)."""
 
-    def __init__(self, repo_path: str, remote_url: str) -> None:
+    def __init__(self, repo_path: str, remote_url: str, bare: bool = False) -> None:
         self._repo_path = repo_path
         self._remote_url = remote_url
+        self._bare = bare
         self._commit_count = 0
 
     def _run_git(self, *args: str, input_data: bytes | None = None) -> subprocess.CompletedProcess:
@@ -29,9 +30,13 @@ class GitCliOperator:
         if not os.path.exists(self._repo_path):
             os.makedirs(self._repo_path, exist_ok=True)
 
+        head_file = os.path.join(self._repo_path, "HEAD")
         git_dir = os.path.join(self._repo_path, ".git")
-        if not os.path.exists(git_dir):
-            self._run_git("init")
+        if not os.path.exists(git_dir) and not os.path.exists(head_file):
+            if self._bare:
+                self._run_git("init", "--bare")
+            else:
+                self._run_git("init")
 
         if self._remote_url:
             result = self._run_git("remote", "get-url", "origin")
@@ -77,10 +82,87 @@ class GitCliOperator:
         logger.info("orphan branch '%s' 예약 (첫 commit 시 생성)", branch)
 
     def push(self, branch: str) -> None:
+        if not self._remote_url:
+            logger.debug("remote_url 미설정 — push 건너뜀: %s", branch)
+            return
         result = self._run_git("push", "origin", branch)
         if result.returncode != 0:
             raise RuntimeError(f"git push 실패: {result.stderr.decode()}")
         logger.info("push 완료: %s", branch)
+
+    def fetch(self, remote: str = "origin") -> None:
+        result = self._run_git("fetch", remote)
+        if result.returncode != 0:
+            raise RuntimeError(f"git fetch 실패: {result.stderr.decode()}")
+
+    def get_log_after(self, branch: str, after_sha: str | None, remote: str = "origin") -> list[dict]:
+        if after_sha:
+            range_spec = f"{after_sha}..{remote}/{branch}"
+        else:
+            range_spec = f"{remote}/{branch}"
+        result = self._run_git("log", range_spec, "--reverse", "--format=%H%n%an%n%ae%n%at%n%P%n%B\x00")
+        if result.returncode != 0:
+            return []
+        commits = []
+        for entry in result.stdout.decode().split("\x00"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            lines = entry.split("\n", 5)
+            if len(lines) < 6:
+                continue
+            commits.append({
+                "sha": lines[0],
+                "author_name": lines[1],
+                "author_email": lines[2],
+                "timestamp": int(lines[3]),
+                "parents": lines[4].split() if lines[4] else [],
+                "message": lines[5].strip(),
+            })
+        return commits
+
+    def get_commit_files(self, commit_sha: str) -> tuple[list[tuple[str, bytes]], list[str]]:
+        result = self._run_git("diff-tree", "-r", "--no-commit-id", "--name-status", commit_sha)
+        if result.returncode != 0:
+            raise RuntimeError(f"git diff-tree 실패: {result.stderr.decode()}")
+
+        file_changes = []
+        deletes = []
+        for line in result.stdout.decode().strip().splitlines():
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            status, path = parts[0], parts[1]
+            if status == "D":
+                deletes.append(path)
+            else:
+                content_result = self._run_git("show", f"{commit_sha}:{path}")
+                if content_result.returncode == 0:
+                    file_changes.append((path, content_result.stdout))
+        return file_changes, deletes
+
+    def delete_branch(self, branch: str) -> None:
+        result = self._run_git("branch", "-D", branch)
+        if result.returncode != 0:
+            logger.warning("branch 삭제 실패: %s — %s", branch, result.stderr.decode())
+        else:
+            logger.info("branch 삭제: %s", branch)
+
+    def list_remote_branches(self, remote: str = "origin", prefix: str = "") -> list[str]:
+        result = self._run_git("branch", "-r", "--format=%(refname:short)")
+        if result.returncode != 0:
+            return []
+        branches = []
+        remote_prefix = f"{remote}/"
+        for line in result.stdout.decode().strip().splitlines():
+            line = line.strip()
+            if line.startswith(remote_prefix):
+                name = line[len(remote_prefix):]
+                if not prefix or name.startswith(prefix):
+                    branches.append(name)
+        return branches
 
     def get_head_sha(self, branch: str) -> str | None:
         result = self._run_git("rev-parse", f"refs/heads/{branch}")

@@ -54,9 +54,10 @@ class _TreeNode:
 class Pygit2GitOperator:
     """pygit2 기반 Git 조작 구현."""
 
-    def __init__(self, repo_path: str, remote_url: str) -> None:
+    def __init__(self, repo_path: str, remote_url: str, bare: bool = False) -> None:
         self._repo_path = repo_path
         self._remote_url = remote_url
+        self._bare = bare
         self._repo: pygit2.Repository | None = None
         self._commit_count = 0
         self._last_gc_time: float = 0.0
@@ -71,7 +72,7 @@ class Pygit2GitOperator:
             self._repo = pygit2.Repository(self._repo_path)
         else:
             os.makedirs(self._repo_path, exist_ok=True)
-            self._repo = pygit2.init_repository(self._repo_path, bare=False)
+            self._repo = pygit2.init_repository(self._repo_path, bare=self._bare)
 
         if self._remote_url:
             try:
@@ -120,6 +121,9 @@ class Pygit2GitOperator:
 
     def push(self, branch: str) -> None:
         """push는 항상 git CLI 사용 (pygit2의 인증 복잡성 회피)."""
+        if not self._remote_url:
+            logger.debug("remote_url 미설정 — push 건너뜀: %s", branch)
+            return
         result = subprocess.run(
             ["git", "push", "origin", branch],
             cwd=self._repo_path,
@@ -129,6 +133,111 @@ class Pygit2GitOperator:
         if result.returncode != 0:
             raise RuntimeError(f"git push 실패: {result.stderr}")
         logger.info("push 완료: %s", branch)
+
+    def fetch(self, remote: str = "origin") -> None:
+        result = subprocess.run(
+            ["git", "fetch", remote],
+            cwd=self._repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git fetch 실패: {result.stderr}")
+        # fetch 후 repo 다시 열기 (새 refs 반영)
+        self._repo = pygit2.Repository(self._repo_path)
+
+    def get_log_after(self, branch: str, after_sha: str | None, remote: str = "origin") -> list[dict]:
+        if after_sha:
+            range_spec = f"{after_sha}..{remote}/{branch}"
+        else:
+            range_spec = f"{remote}/{branch}"
+        result = subprocess.run(
+            ["git", "log", range_spec, "--reverse", "--format=%H%n%an%n%ae%n%at%n%P%n%B%x00"],
+            cwd=self._repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return []
+        commits = []
+        for entry in result.stdout.split("\x00"):
+            entry = entry.strip()
+            if not entry:
+                continue
+            lines = entry.split("\n", 5)
+            if len(lines) < 6:
+                continue
+            commits.append({
+                "sha": lines[0],
+                "author_name": lines[1],
+                "author_email": lines[2],
+                "timestamp": int(lines[3]),
+                "parents": lines[4].split() if lines[4] else [],
+                "message": lines[5].strip(),
+            })
+        return commits
+
+    def get_commit_files(self, commit_sha: str) -> tuple[list[tuple[str, bytes]], list[str]]:
+        # diff-tree로 변경 파일 목록
+        result = subprocess.run(
+            ["git", "diff-tree", "-r", "--no-commit-id", "--name-status", commit_sha],
+            cwd=self._repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"git diff-tree 실패: {result.stderr}")
+
+        file_changes = []
+        deletes = []
+        for line in result.stdout.strip().splitlines():
+            if not line:
+                continue
+            parts = line.split("\t", 1)
+            if len(parts) != 2:
+                continue
+            status, path = parts[0], parts[1]
+            if status == "D":
+                deletes.append(path)
+            else:
+                # A, M, etc — 파일 내용 추출
+                content_result = subprocess.run(
+                    ["git", "show", f"{commit_sha}:{path}"],
+                    cwd=self._repo_path,
+                    capture_output=True,
+                )
+                if content_result.returncode == 0:
+                    file_changes.append((path, content_result.stdout))
+        return file_changes, deletes
+
+    def delete_branch(self, branch: str) -> None:
+        ref_name = f"refs/heads/{branch}"
+        try:
+            ref = self._repo.references.get(ref_name)
+            if ref is not None:
+                ref.delete()
+                logger.info("branch 삭제: %s", branch)
+        except Exception as e:
+            logger.warning("branch 삭제 실패: %s — %s", branch, e)
+
+    def list_remote_branches(self, remote: str = "origin", prefix: str = "") -> list[str]:
+        result = subprocess.run(
+            ["git", "branch", "-r", "--format=%(refname:short)"],
+            cwd=self._repo_path,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return []
+        branches = []
+        remote_prefix = f"{remote}/"
+        for line in result.stdout.strip().splitlines():
+            line = line.strip()
+            if line.startswith(remote_prefix):
+                name = line[len(remote_prefix):]
+                if not prefix or name.startswith(prefix):
+                    branches.append(name)
+        return branches
 
     def get_head_sha(self, branch: str) -> str | None:
         ref_name = f"refs/heads/{branch}"

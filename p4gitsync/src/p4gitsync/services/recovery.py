@@ -181,10 +181,11 @@ def _create_git_operator(config: AppConfig) -> GitOperator:
     backend = config.git.backend
     repo_path = config.git.repo_path
     remote_url = config.git.remote_url
+    bare = config.git.bare
 
     if backend == "cli":
         from p4gitsync.git.git_cli_operator import GitCliOperator
-        return GitCliOperator(repo_path=repo_path, remote_url=remote_url)
+        return GitCliOperator(repo_path=repo_path, remote_url=remote_url, bare=bare)
 
     from p4gitsync.git.pygit2_git_operator import Pygit2GitOperator
-    return Pygit2GitOperator(repo_path=repo_path, remote_url=remote_url)
+    return Pygit2GitOperator(repo_path=repo_path, remote_url=remote_url, bare=bare)
