@@ -70,6 +70,14 @@ def _build_parser() -> argparse.ArgumentParser:
     cutover_group.add_argument("--dry-run", action="store_true", help="컷오버 시뮬레이션 (실제 변경 없음)")
     cutover_group.add_argument("--execute", action="store_true", help="컷오버 실행")
 
+    tree_parser = subparsers.add_parser("tree", help="P4 Stream 계층 트리 미리보기")
+    tree_parser.add_argument(
+        "--depot", help="P4 depot 경로 (미지정 시 p4.stream에서 추출)",
+    )
+    tree_parser.add_argument(
+        "--include-deleted", action="store_true", help="삭제된 stream 포함",
+    )
+
     return parser
 
 
@@ -193,6 +201,45 @@ def _run_cutover(config: AppConfig, dry_run: bool) -> None:
         sys.exit(1)
 
 
+def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool) -> None:
+    from p4gitsync.p4.p4_client import P4Client
+    from p4gitsync.services.stream_tree_viewer import StreamTreeViewer
+
+    # depot 추출
+    if depot:
+        p4_depot = depot
+    else:
+        stream = config.p4.stream
+        parts = stream.rstrip("/").split("/")
+        p4_depot = "/".join(parts[:3])  # //depot
+
+    p4_client = P4Client(
+        port=config.p4.port,
+        user=config.p4.user,
+        workspace=config.p4.workspace,
+    )
+    p4_client.connect()
+
+    try:
+        viewer = StreamTreeViewer(p4_client)
+        roots = viewer.build_tree(
+            p4_depot,
+            default_branch=config.git.default_branch,
+            include_deleted=include_deleted,
+        )
+
+        if not roots:
+            print(f"Stream을 찾을 수 없습니다: {p4_depot}")
+            return
+
+        print(f"\nP4 Stream Tree: {p4_depot}")
+        print("=" * 60)
+        print(viewer.format_tree(roots))
+        print(viewer.format_summary(roots))
+    finally:
+        p4_client.disconnect()
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -212,6 +259,8 @@ def main() -> None:
         _run_reinit_git(config, args.remote)
     elif command == "cutover":
         _run_cutover(config, args.dry_run)
+    elif command == "tree":
+        _run_tree(config, args.depot, args.include_deleted)
     else:
         _run_sync(config)
 
