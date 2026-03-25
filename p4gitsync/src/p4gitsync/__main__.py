@@ -81,6 +81,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--include-virtual", action="store_true", help="virtual stream 포함",
     )
 
+    preview_parser = subparsers.add_parser(
+        "preview", help="import 미리보기 — branch/merge 타임라인 문서 생성",
+    )
+    preview_parser.add_argument(
+        "--depot", help="P4 depot 경로 (미지정 시 p4.stream에서 추출)",
+    )
+    preview_parser.add_argument(
+        "--output", "-o", default="import-preview.md",
+        help="출력 파일 경로 (기본: import-preview.md)",
+    )
+    preview_parser.add_argument(
+        "--no-merge-scan", action="store_true",
+        help="merge 스캔 생략 (빠른 미리보기, branch 구조만)",
+    )
+    preview_parser.add_argument(
+        "--merge-scan-limit", type=int, default=0,
+        help="stream당 merge 스캔 CL 수 제한 (0=전체, 예: 1000=최근 1000건만)",
+    )
+
     return parser
 
 
@@ -244,6 +263,65 @@ def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool, inclu
         p4_client.disconnect()
 
 
+def _run_preview(
+    config: AppConfig,
+    depot: str | None,
+    output: str,
+    no_merge_scan: bool,
+    merge_scan_limit: int,
+) -> None:
+    from p4gitsync.p4.p4_client import P4Client
+    from p4gitsync.services.import_preview import ImportPreview
+
+    if depot:
+        p4_depot = depot
+    else:
+        stream = config.p4.stream
+        parts = stream.rstrip("/").split("/")
+        p4_depot = "/".join(parts[:3])
+
+    p4_client = P4Client(
+        port=config.p4.port,
+        user=config.p4.user,
+        workspace=config.p4.workspace,
+    )
+    p4_client.connect()
+
+    try:
+        preview = ImportPreview(p4_client)
+
+        scan_merges = not no_merge_scan
+        if scan_merges:
+            print(f"merge 스캔 중... (시간이 걸릴 수 있습니다)")
+            if merge_scan_limit:
+                print(f"  stream당 최근 {merge_scan_limit} CL만 스캔")
+
+        summaries, events = preview.build_preview(
+            p4_depot,
+            default_branch=config.git.default_branch,
+            scan_merges=scan_merges,
+            merge_scan_limit=merge_scan_limit,
+        )
+
+        report = preview.format_report(summaries, events)
+
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(report)
+
+        print(f"\n미리보기 문서 생성 완료: {output}")
+
+        # 간략 요약 출력
+        total_cls = sum(s.total_cls for s in summaries)
+        total_merges = sum(s.merge_count for s in summaries)
+        branch_points = sum(1 for e in events if e.event_type == "branch_point")
+        print(f"  Branch: {len(summaries)}개")
+        print(f"  총 CL: {total_cls:,}개")
+        print(f"  분기점: {branch_points}개")
+        print(f"  Merge: {total_merges}개")
+    finally:
+        p4_client.disconnect()
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
@@ -265,6 +343,11 @@ def main() -> None:
         _run_cutover(config, args.dry_run)
     elif command == "tree":
         _run_tree(config, args.depot, args.include_deleted, args.include_virtual)
+    elif command == "preview":
+        _run_preview(
+            config, args.depot, args.output,
+            args.no_merge_scan, args.merge_scan_limit,
+        )
     else:
         _run_sync(config)
 
