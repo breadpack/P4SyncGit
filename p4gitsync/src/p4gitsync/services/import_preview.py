@@ -11,6 +11,14 @@ from p4gitsync.p4.merge_analyzer import MergeAnalyzer, INTEGRATION_ACTIONS
 _MERGE_DESC_PATTERN = re.compile(
     r"(?:Merge|Copy|Copying|Premerge)\s+(//[^\s.]+)", re.IGNORECASE,
 )
+_CHERRYPICK_DESC_PATTERN = re.compile(
+    r"\[(?:핫픽스|hotfix|cherry-?pick)[^]]*\]"
+    r".*?\[(?:(\w+)@(\d+))",
+    re.IGNORECASE,
+)
+_SOURCE_REF_PATTERN = re.compile(
+    r"\[(\w+)@(\d+(?:[.,]\d+)*)\]",
+)
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.services.stream_tree_viewer import StreamTreeViewer, StreamInfo
 
@@ -209,25 +217,23 @@ class ImportPreview:
                 if not integration_files:
                     continue
 
-                # description에서 source stream 추출, 없으면 filelog 1건으로 fallback
-                source_stream = self._extract_source_from_description(info.description)
-                if source_stream is None:
-                    source_stream = self._detect_source_from_filelog(
-                        integration_files[0].depot_path, cl,
-                    )
+                # cherry-pick vs full merge 분류
+                event_type, source_stream, source_cl = self._classify_integration(
+                    info.description, integration_files, cl,
+                )
 
                 merge_count += 1
                 events.append(PreviewEvent(
                     cl=cl,
                     timestamp=info.timestamp,
-                    event_type="merge",
+                    event_type=event_type,
                     branch=si.branch,
                     stream=si.stream,
                     description=info.description[:100],
                     user=info.user,
                     workspace=info.workspace,
                     merge_source=source_stream,
-                    merge_source_cl=None,
+                    merge_source_cl=source_cl,
                     file_count=len(integration_files),
                 ))
 
@@ -239,6 +245,44 @@ class ImportPreview:
                 )
 
         return events, merge_count
+
+    def _classify_integration(
+        self,
+        description: str,
+        integration_files: list,
+        cl: int,
+    ) -> tuple[str, str | None, int | None]:
+        """integration CL을 cherry-pick vs full merge로 분류.
+
+        Returns:
+            (event_type, source_stream, source_cl)
+        """
+        # 1. 핫픽스/cherry-pick 패턴 확인
+        cp_match = _CHERRYPICK_DESC_PATTERN.search(description)
+        if cp_match:
+            source_name = cp_match.group(1)  # "alpha", "dev" 등
+            source_cl_str = cp_match.group(2)
+            source_cl = int(source_cl_str.split(",")[0].split(".")[0]) if source_cl_str else None
+            # source stream 이름 → 전체 경로 추정
+            source_stream = f"//stream/{source_name}" if source_name else None
+            return "cherry_pick", source_stream, source_cl
+
+        # 2. [stream@CL] 패턴 (핫픽스 키워드 없어도)
+        ref_match = _SOURCE_REF_PATTERN.search(description)
+        if ref_match and len(integration_files) <= 10:
+            source_name = ref_match.group(1)
+            source_cl_str = ref_match.group(2)
+            source_cl = int(source_cl_str.split(",")[0].split(".")[0]) if source_cl_str else None
+            source_stream = f"//stream/{source_name}" if source_name else None
+            return "cherry_pick", source_stream, source_cl
+
+        # 3. Full merge — description 패턴 또는 filelog fallback
+        source_stream = self._extract_source_from_description(description)
+        if source_stream is None:
+            source_stream = self._detect_source_from_filelog(
+                integration_files[0].depot_path, cl,
+            )
+        return "merge", source_stream, None
 
     def _detect_source_from_filelog(self, depot_path: str, cl: int) -> str | None:
         """integration 파일 1개의 filelog에서 source stream을 추출한다."""
@@ -294,23 +338,26 @@ class ImportPreview:
             "",
             "## Branch 요약",
             "",
-            "| Branch | Stream | CL 수 | Merge 수 | 분기점 | Parent |",
-            "|--------|--------|-------|----------|--------|--------|",
+            "| Branch | Stream | CL 수 | Merge | Cherry-pick | 분기점 | Parent |",
+            "|--------|--------|-------|-------|-------------|--------|--------|",
         ]
 
         for s in summaries:
-            cl_range = f"CL {s.first_cl}~{s.last_cl}" if s.first_cl else "-"
             bp = f"CL {s.branch_point_cl}" if s.branch_point_cl else "-"
+            cp_count = sum(1 for m in s.merges if m.event_type == "cherry_pick")
+            mg_count = sum(1 for m in s.merges if m.event_type == "merge")
             lines.append(
                 f"| {s.branch} | {s.stream} | {s.total_cls:,} | "
-                f"{s.merge_count} | {bp} | {s.parent_branch or '-'} |"
+                f"{mg_count} | {cp_count} | {bp} | {s.parent_branch or '-'} |"
             )
 
         total_cls = sum(s.total_cls for s in summaries)
-        total_merges = sum(s.merge_count for s in summaries)
+        total_merges = sum(1 for e in events if e.event_type == "merge")
+        total_cp = sum(1 for e in events if e.event_type == "cherry_pick")
         lines.extend([
             "",
-            f"**총 {len(summaries)}개 branch, {total_cls:,} CL, {total_merges} merge**",
+            f"**총 {len(summaries)}개 branch, {total_cls:,} CL, "
+            f"{total_merges} merge, {total_cp} cherry-pick**",
         ])
 
         # Git branch 트리
@@ -324,6 +371,7 @@ class ImportPreview:
 
         branch_points = [e for e in events if e.event_type == "branch_point"]
         merges = [e for e in events if e.event_type == "merge"]
+        cherry_picks = [e for e in events if e.event_type == "cherry_pick"]
 
         if branch_points:
             lines.extend(["### Branch 생성", ""])
@@ -333,13 +381,25 @@ class ImportPreview:
                 lines.append(f"| {e.cl} | `{e.branch}` | {e.description} |")
 
         if merges:
-            lines.extend(["", "### Merge (Integration)", ""])
-            lines.append("| CL | Target Branch | Source Stream | Source CL | 파일 수 | 설명 |")
-            lines.append("|---:|--------------|--------------|----------:|--------:|------|")
+            lines.extend(["", "### Merge (Full Integration)", ""])
+            lines.append("| CL | Target Branch | Source Stream | 파일 수 | 설명 |")
+            lines.append("|---:|--------------|--------------|--------:|------|")
             for e in sorted(merges, key=lambda x: x.cl):
-                desc = e.description.replace("|", "/")[:60]
+                desc = e.description.replace("|", "/").replace("\n", " ")[:60]
                 lines.append(
-                    f"| {e.cl} | `{e.branch}` | {e.merge_source} | "
+                    f"| {e.cl} | `{e.branch}` | {e.merge_source or '?'} | "
+                    f"{e.file_count} | {desc} |"
+                )
+
+        if cherry_picks:
+            lines.extend(["", "### Cherry-pick (Hotfix)", ""])
+            lines.append("| CL | Target Branch | Source | Source CL | 파일 수 | 설명 |")
+            lines.append("|---:|--------------|--------|----------:|--------:|------|")
+            for e in sorted(cherry_picks, key=lambda x: x.cl):
+                desc = e.description.replace("|", "/").replace("\n", " ")[:60]
+                source_short = e.merge_source.split("/")[-1] if e.merge_source else "?"
+                lines.append(
+                    f"| {e.cl} | `{e.branch}` | {source_short} | "
                     f"{e.merge_source_cl or '-'} | {e.file_count} | {desc} |"
                 )
 
