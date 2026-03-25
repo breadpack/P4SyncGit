@@ -307,8 +307,11 @@ def _run_preview(
         with open(output, "w", encoding="utf-8") as f:
             f.write(report)
 
-        # HTML 시각화 파일도 함께 생성
-        html_output = output.rsplit(".", 1)[0] + ".html"
+        # HTML 시각화 파일 생성
+        base_name = output.rsplit(".", 1)[0]
+        html_output = base_name + ".html"
+        graph_output = base_name + "-graph.html"
+
         html_report = preview.format_html(
             summaries, events,
             depot=p4_depot,
@@ -317,9 +320,18 @@ def _run_preview(
         with open(html_output, "w", encoding="utf-8") as f:
             f.write(html_report)
 
+        graph_report = preview.format_git_graph_html(
+            summaries, events,
+            depot=p4_depot,
+            server=f"{config.p4.user}@{config.p4.port}",
+        )
+        with open(graph_output, "w", encoding="utf-8") as f:
+            f.write(graph_report)
+
         print(f"\n미리보기 문서 생성 완료:")
-        print(f"  마크다운: {output}")
-        print(f"  시각화:   {html_output}")
+        print(f"  마크다운:   {output}")
+        print(f"  다이어그램: {html_output}")
+        print(f"  커밋 그래프: {graph_output}")
 
         # 간략 요약 출력
         total_cls = sum(s.total_cls for s in summaries)

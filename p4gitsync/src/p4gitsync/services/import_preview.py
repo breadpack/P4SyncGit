@@ -568,6 +568,270 @@ mermaid.initialize({{ startOnLoad:true, theme:'dark', gitGraph:{{ mainBranchName
 </body>
 </html>"""
 
+    def format_git_graph_html(
+        self,
+        summaries: list[BranchSummary],
+        events: list[PreviewEvent],
+        depot: str = "",
+        server: str = "",
+    ) -> str:
+        """git GUI 스타일의 커밋 그래프 HTML을 생성한다."""
+        import json
+
+        merges = [e for e in events if e.event_type == "merge"]
+        cherry_picks = [e for e in events if e.event_type == "cherry_pick"]
+        branch_points = [e for e in events if e.event_type == "branch_point"]
+        total_cls = sum(s.total_cls for s in summaries)
+
+        # 이벤트를 JSON으로 변환
+        graph_events = []
+        for e in sorted(events, key=lambda x: x.cl):
+            if e.event_type in ("first_commit", "last_commit"):
+                continue
+            src_branch = None
+            if e.merge_source:
+                src_name = e.merge_source.split("/")[-1]
+                for s in summaries:
+                    if s.branch == src_name:
+                        src_branch = src_name
+                        break
+            graph_events.append({
+                "cl": e.cl,
+                "type": e.event_type,
+                "branch": e.branch,
+                "source_branch": src_branch,
+                "source_cl": e.merge_source_cl,
+                "files": e.file_count,
+                "desc": e.description[:60].replace("\n", " ").replace('"', "'"),
+            })
+
+        branches_json = json.dumps([
+            {"name": s.branch, "parent": s.parent_branch, "bp": s.branch_point_cl,
+             "cls": s.total_cls, "merges": sum(1 for m in s.merges if m.event_type == "merge"),
+             "cps": sum(1 for m in s.merges if m.event_type == "cherry_pick")}
+            for s in summaries
+        ], ensure_ascii=False)
+        events_json = json.dumps(graph_events, ensure_ascii=False)
+
+        return f"""<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>P4GitSync Commit Graph</title>
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ font-family:'Consolas','Courier New',monospace; background:#0d1117; color:#c9d1d9; }}
+.header {{ padding:16px 20px; background:#161b22; border-bottom:1px solid #30363d; }}
+.header h1 {{ font-size:16px; color:#58a6ff; font-weight:normal; }}
+.header .stats {{ margin-top:6px; font-size:12px; color:#8b949e; }}
+.header .stats span {{ margin-right:16px; }}
+.header .stats b {{ color:#c9d1d9; }}
+.legend {{ padding:8px 20px; background:#161b22; border-bottom:1px solid #30363d; font-size:12px; display:flex; gap:16px; flex-wrap:wrap; }}
+.legend-item {{ display:flex; align-items:center; gap:4px; }}
+.legend-dot {{ width:10px; height:10px; border-radius:50%; display:inline-block; }}
+.legend-line {{ width:20px; height:2px; display:inline-block; }}
+.container {{ display:flex; height:calc(100vh - 90px); }}
+.graph-panel {{ width:320px; min-width:320px; overflow-y:auto; background:#0d1117; border-right:1px solid #30363d; }}
+.detail-panel {{ flex:1; overflow-y:auto; padding:0; }}
+.row {{ display:flex; height:28px; align-items:center; cursor:pointer; padding-right:8px; }}
+.row:hover {{ background:#161b22; }}
+.row.selected {{ background:#1c2333; }}
+.graph-cell {{ width:280px; min-width:280px; height:28px; position:relative; }}
+.cl-label {{ font-size:11px; color:#8b949e; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; padding-left:4px; }}
+.detail-panel .info {{ padding:16px 20px; }}
+.detail-panel .info h3 {{ color:#58a6ff; font-size:14px; margin-bottom:8px; }}
+.detail-panel .info p {{ font-size:12px; color:#8b949e; margin:4px 0; }}
+.detail-panel .info .tag {{ display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; margin:2px; }}
+.tag-merge {{ background:#1f3d1f; color:#3fb950; }}
+.tag-cp {{ background:#3d2f1f; color:#d29922; }}
+.tag-branch {{ background:#1f2d3d; color:#58a6ff; }}
+svg {{ display:block; }}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>P4GitSync Commit Graph &mdash; {depot}</h1>
+  <div class="stats">
+    <span>Server: <b>{server}</b></span>
+    <span>Branches: <b>{len(summaries)}</b></span>
+    <span>CL: <b>{total_cls:,}</b></span>
+    <span>Merge: <b>{len(merges)}</b></span>
+    <span>Cherry-pick: <b>{len(cherry_picks)}</b></span>
+  </div>
+</div>
+<div class="legend" id="legend"></div>
+<div class="container">
+  <div class="graph-panel" id="graphPanel"></div>
+  <div class="detail-panel" id="detailPanel">
+    <div class="info" style="padding:40px;color:#484f58;">
+      커밋을 클릭하면 상세 정보가 표시됩니다.
+    </div>
+  </div>
+</div>
+
+<script>
+const BRANCHES = {branches_json};
+const EVENTS = {events_json};
+
+const COLORS = [
+  '#3fb950','#58a6ff','#f85149','#d29922','#bc8cff',
+  '#39d2c0','#f778ba','#79c0ff','#ffa657',
+];
+const branchColor = {{}};
+const branchIndex = {{}};
+BRANCHES.forEach((b, i) => {{
+  branchColor[b.name] = COLORS[i % COLORS.length];
+  branchIndex[b.name] = i;
+}});
+
+const COL_W = 28;
+const ROW_H = 28;
+const DOT_R = 5;
+const LINE_W = 2;
+
+function buildLegend() {{
+  const el = document.getElementById('legend');
+  BRANCHES.forEach(b => {{
+    const c = branchColor[b.name];
+    el.innerHTML += `<div class="legend-item">
+      <span class="legend-dot" style="background:${{c}}"></span>
+      <span style="color:${{c}}">${{b.name}}</span>
+      <span style="color:#484f58">(${{b.cls.toLocaleString()}} CL, ${{b.merges}}M+${{b.cps}}CP)</span>
+    </div>`;
+  }});
+}}
+
+function buildGraph() {{
+  const panel = document.getElementById('graphPanel');
+  const activeBranches = new Set();
+  const rows = [];
+
+  EVENTS.forEach((ev, idx) => {{
+    if (ev.type === 'branch_point') activeBranches.add(ev.branch);
+    const active = [...activeBranches];
+    rows.push({{ ev, active: [...active], idx }});
+    if (ev.type === 'branch_point') {{}} // already added
+  }});
+
+  // Ensure main branch is always active
+  if (BRANCHES.length > 0) activeBranches.add(BRANCHES[0].name);
+
+  const svgW = BRANCHES.length * COL_W + 20;
+  const svgH = rows.length * ROW_H;
+
+  rows.forEach((row, ri) => {{
+    const ev = row.ev;
+    const col = branchIndex[ev.branch] ?? 0;
+    const color = branchColor[ev.branch] || '#484f58';
+
+    // Create row element
+    const rowEl = document.createElement('div');
+    rowEl.className = 'row';
+    rowEl.dataset.idx = ri;
+    rowEl.onclick = () => showDetail(ev);
+
+    // SVG for graph
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('width', svgW);
+    svg.setAttribute('height', ROW_H);
+    svg.style.width = svgW + 'px';
+    svg.style.height = ROW_H + 'px';
+    const graphCell = document.createElement('div');
+    graphCell.className = 'graph-cell';
+    graphCell.style.width = svgW + 'px';
+
+    // Draw vertical lines for active branches
+    row.active.forEach(bname => {{
+      const bi = branchIndex[bname] ?? 0;
+      const x = bi * COL_W + COL_W / 2;
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', x); line.setAttribute('y1', 0);
+      line.setAttribute('x2', x); line.setAttribute('y2', ROW_H);
+      line.setAttribute('stroke', branchColor[bname] || '#30363d');
+      line.setAttribute('stroke-width', LINE_W);
+      line.setAttribute('opacity', '0.4');
+      svg.appendChild(line);
+    }});
+
+    const cx = col * COL_W + COL_W / 2;
+    const cy = ROW_H / 2;
+
+    // Merge/cherry-pick connection line
+    if ((ev.type === 'merge' || ev.type === 'cherry_pick') && ev.source_branch) {{
+      const srcCol = branchIndex[ev.source_branch] ?? col;
+      const sx = srcCol * COL_W + COL_W / 2;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      const midX = (sx + cx) / 2;
+      path.setAttribute('d', `M${{sx}},${{0}} C${{sx}},${{cy}} ${{cx}},${{cy * 0.3}} ${{cx}},${{cy}}`);
+      path.setAttribute('stroke', ev.type === 'cherry_pick' ? '#d29922' : color);
+      path.setAttribute('stroke-width', LINE_W);
+      path.setAttribute('fill', 'none');
+      if (ev.type === 'cherry_pick') path.setAttribute('stroke-dasharray', '4,3');
+      svg.appendChild(path);
+    }}
+
+    // Commit dot
+    const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    circle.setAttribute('cx', cx); circle.setAttribute('cy', cy);
+    circle.setAttribute('r', ev.type === 'branch_point' ? DOT_R + 2 : DOT_R);
+    if (ev.type === 'cherry_pick') {{
+      circle.setAttribute('fill', '#0d1117');
+      circle.setAttribute('stroke', '#d29922');
+      circle.setAttribute('stroke-width', '2');
+    }} else if (ev.type === 'branch_point') {{
+      circle.setAttribute('fill', '#0d1117');
+      circle.setAttribute('stroke', color);
+      circle.setAttribute('stroke-width', '2');
+    }} else {{
+      circle.setAttribute('fill', color);
+    }}
+    svg.appendChild(circle);
+
+    graphCell.appendChild(svg);
+    rowEl.appendChild(graphCell);
+
+    // CL label
+    const label = document.createElement('div');
+    label.className = 'cl-label';
+    const typeIcon = ev.type === 'merge' ? '\u2190' : ev.type === 'cherry_pick' ? '\u2662' : '\u25cb';
+    label.textContent = `${{typeIcon}} CL${{ev.cl}} ${{ev.desc}}`;
+    label.style.color = ev.type === 'cherry_pick' ? '#d29922' : color;
+    rowEl.appendChild(label);
+
+    panel.appendChild(rowEl);
+  }});
+}}
+
+function showDetail(ev) {{
+  const dp = document.getElementById('detailPanel');
+  const color = branchColor[ev.branch] || '#c9d1d9';
+  let typeTag = '';
+  if (ev.type === 'merge') typeTag = '<span class="tag tag-merge">MERGE</span>';
+  else if (ev.type === 'cherry_pick') typeTag = '<span class="tag tag-cp">CHERRY-PICK</span>';
+  else if (ev.type === 'branch_point') typeTag = '<span class="tag tag-branch">BRANCH</span>';
+
+  let srcInfo = '';
+  if (ev.source_branch) srcInfo = `<p>Source: <b style="color:${{branchColor[ev.source_branch] || '#c9d1d9'}}">${{ev.source_branch}}</b></p>`;
+  if (ev.source_cl) srcInfo += `<p>Source CL: <b>${{ev.source_cl}}</b></p>`;
+
+  dp.innerHTML = `<div class="info">
+    <h3 style="color:${{color}}">CL ${{ev.cl}} ${{typeTag}}</h3>
+    <p>Branch: <b style="color:${{color}}">${{ev.branch}}</b></p>
+    ${{srcInfo}}
+    <p>Files: <b>${{ev.files}}</b></p>
+    <p style="margin-top:12px;color:#c9d1d9;white-space:pre-wrap;font-size:13px;">${{ev.desc}}</p>
+  </div>`;
+
+  document.querySelectorAll('.row').forEach(r => r.classList.remove('selected'));
+  const sel = document.querySelector(`.row[data-idx]`);
+}}
+
+buildLegend();
+buildGraph();
+</script>
+</body>
+</html>"""
+
     def _build_mermaid_git_graph(
         self, summaries: list[BranchSummary], events: list[PreviewEvent],
     ) -> str:
