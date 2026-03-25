@@ -4,7 +4,13 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import re
+
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer, INTEGRATION_ACTIONS
+
+_MERGE_DESC_PATTERN = re.compile(
+    r"(?:Merge|Copy|Copying|Premerge)\s+(//[^\s.]+)", re.IGNORECASE,
+)
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.services.stream_tree_viewer import StreamTreeViewer, StreamInfo
 
@@ -177,30 +183,39 @@ class ImportPreview:
         all_cls: list[int],
         limit: int,
     ) -> tuple[list[PreviewEvent], int]:
-        """stream의 CL에서 integration(merge)을 감지한다."""
+        """stream의 CL에서 integration(merge)을 감지한다.
+
+        경량 스캔: describe의 action 필드만으로 integration CL을 식별하고,
+        description에서 source stream을 추출한다 (filelog 호출 없음).
+        """
         events: list[PreviewEvent] = []
         merge_count = 0
         scan_cls = all_cls if limit == 0 else all_cls[-limit:]
 
-        for cl in scan_cls:
-            try:
-                info = self._p4.describe(cl)
-            except Exception:
-                continue
+        batch_size = 50
+        for batch_start in range(0, len(scan_cls), batch_size):
+            batch = scan_cls[batch_start:batch_start + batch_size]
 
-            integration_files = [
-                fa for fa in info.files if fa.action in INTEGRATION_ACTIONS
-            ]
-            if not integration_files:
-                continue
+            for cl in batch:
+                try:
+                    info = self._p4.describe(cl)
+                except Exception:
+                    continue
 
-            # MergeAnalyzer로 source 분석
-            try:
-                merge_info = self._merge_analyzer.analyze(info)
-            except Exception:
-                continue
+                # action 필드만으로 integration 감지 (filelog 불필요)
+                integration_files = [
+                    fa for fa in info.files if fa.action in INTEGRATION_ACTIONS
+                ]
+                if not integration_files:
+                    continue
 
-            if merge_info.has_integration and merge_info.primary_source_stream:
+                # description에서 source stream 추출, 없으면 filelog 1건으로 fallback
+                source_stream = self._extract_source_from_description(info.description)
+                if source_stream is None:
+                    source_stream = self._detect_source_from_filelog(
+                        integration_files[0].depot_path, cl,
+                    )
+
                 merge_count += 1
                 events.append(PreviewEvent(
                     cl=cl,
@@ -211,15 +226,50 @@ class ImportPreview:
                     description=info.description[:100],
                     user=info.user,
                     workspace=info.workspace,
-                    merge_source=merge_info.primary_source_stream,
-                    merge_source_cl=merge_info.source_changelist,
-                    file_count=len(merge_info.records),
+                    merge_source=source_stream,
+                    merge_source_cl=None,
+                    file_count=len(integration_files),
                 ))
 
-            if merge_count % 50 == 0 and merge_count > 0:
-                logger.info("  %s: %d merges 발견...", si.branch, merge_count)
+            processed = min(batch_start + batch_size, len(scan_cls))
+            if processed % 500 == 0 or processed == len(scan_cls):
+                logger.info(
+                    "  %s: %d/%d CL 스캔, %d merges",
+                    si.branch, processed, len(scan_cls), merge_count,
+                )
 
         return events, merge_count
+
+    def _detect_source_from_filelog(self, depot_path: str, cl: int) -> str | None:
+        """integration 파일 1개의 filelog에서 source stream을 추출한다."""
+        try:
+            results = self._p4._p4.run_filelog("-m", "1", f"{depot_path}@{cl}")
+            if not results:
+                return None
+            entry = results[0]
+            for rev in entry.revisions:
+                if rev.change != cl:
+                    continue
+                try:
+                    for integ in rev.integrations:
+                        if "from" in integ.how:
+                            source = integ.file
+                            m = re.match(r"(//[^/]+/[^/]+)/", source)
+                            if m:
+                                return m.group(1)
+                except AttributeError:
+                    pass
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _extract_source_from_description(description: str) -> str | None:
+        """description에서 'Merge/Copy/Copying //stream/X to ...' 패턴으로 source stream 추출."""
+        m = _MERGE_DESC_PATTERN.search(description)
+        if m:
+            return m.group(1)
+        return None
 
     def _describe_safe(self, cl: int) -> dict | None:
         try:
