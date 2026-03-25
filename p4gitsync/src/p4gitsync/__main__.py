@@ -304,20 +304,33 @@ def _run_preview(
         )
 
         report = preview.format_report(summaries, events)
-
         with open(output, "w", encoding="utf-8") as f:
             f.write(report)
 
-        print(f"\n미리보기 문서 생성 완료: {output}")
+        # HTML 시각화 파일도 함께 생성
+        html_output = output.rsplit(".", 1)[0] + ".html"
+        html_report = preview.format_html(
+            summaries, events,
+            depot=p4_depot,
+            server=f"{config.p4.user}@{config.p4.port}",
+        )
+        with open(html_output, "w", encoding="utf-8") as f:
+            f.write(html_report)
+
+        print(f"\n미리보기 문서 생성 완료:")
+        print(f"  마크다운: {output}")
+        print(f"  시각화:   {html_output}")
 
         # 간략 요약 출력
         total_cls = sum(s.total_cls for s in summaries)
-        total_merges = sum(s.merge_count for s in summaries)
+        merges = sum(1 for e in events if e.event_type == "merge")
+        cps = sum(1 for e in events if e.event_type == "cherry_pick")
         branch_points = sum(1 for e in events if e.event_type == "branch_point")
         print(f"  Branch: {len(summaries)}개")
         print(f"  총 CL: {total_cls:,}개")
         print(f"  분기점: {branch_points}개")
-        print(f"  Merge: {total_merges}개")
+        print(f"  Merge: {merges}개")
+        print(f"  Cherry-pick: {cps}개")
     finally:
         p4_client.disconnect()
 
