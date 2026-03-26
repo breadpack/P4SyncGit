@@ -6,6 +6,7 @@ from p4gitsync.config.lfs_config import LfsConfig
 from p4gitsync.config.sync_config import InitialImportConfig
 from p4gitsync.git.commit_metadata import CommitMetadata
 from p4gitsync.git.fast_importer import FastImporter
+from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.p4.p4_file_action import ADD_EDIT_ACTIONS, DELETE_ACTIONS
@@ -26,6 +27,7 @@ class InitialImporter:
         stream: str,
         config: InitialImportConfig | None = None,
         lfs_config: LfsConfig | None = None,
+        lfs_store: LfsObjectStore | None = None,
     ) -> None:
         self._p4 = p4_client
         self._state = state_store
@@ -33,6 +35,7 @@ class InitialImporter:
         self._stream = stream
         self._stream_prefix_len = len(stream) + 1
         self._lfs = lfs_config
+        self._lfs_store = lfs_store
 
         cfg = config or InitialImportConfig()
         self._checkpoint_interval = cfg.checkpoint_interval
@@ -116,11 +119,24 @@ class InitialImporter:
             if fa.action in DELETE_ACTIONS:
                 deletes.append(git_path)
             elif fa.action in ADD_EDIT_ACTIONS:
-                content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
-                if content is not None:
-                    if self._lfs and self._lfs.enabled and self._lfs.is_lfs_target(git_path):
-                        content = LfsConfig.create_lfs_pointer(content)
-                    files.append((git_path, content))
+                if self._lfs and self._lfs.enabled and self._lfs.is_lfs_target(git_path):
+                    if self._lfs_store:
+                        tmp_path = self._p4.print_file_to_disk(
+                            fa.depot_path, fa.revision, self._lfs_store.tmp_dir
+                        )
+                        pointer = self._lfs_store.store_from_file(tmp_path)
+                        content = pointer.pointer_bytes
+                        files.append((git_path, content))
+                    else:
+                        # fallback for backward compat (no store provided)
+                        content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
+                        if content is not None:
+                            content = LfsConfig.create_lfs_pointer(content)
+                            files.append((git_path, content))
+                else:
+                    content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
+                    if content is not None:
+                        files.append((git_path, content))
 
         return files, deletes
 
