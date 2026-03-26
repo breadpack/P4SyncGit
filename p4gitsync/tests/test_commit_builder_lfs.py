@@ -15,7 +15,9 @@ class TestCommitBuilderLfsRouting:
     def lfs_config(self) -> LfsConfig:
         return LfsConfig(enabled=True, extensions=[".png", ".uasset"])
 
-    def test_lfs_target_uses_store(self, lfs_store: LfsObjectStore, lfs_config: LfsConfig):
+    def test_lfs_target_uses_store(
+        self, lfs_store: LfsObjectStore, lfs_config: LfsConfig
+    ):
         src = lfs_store.tmp_dir / "test.png"
         src.write_bytes(b"fake png binary data")
         pointer = lfs_store.store_from_file(src)

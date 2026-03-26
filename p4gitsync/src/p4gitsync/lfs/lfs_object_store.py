@@ -65,7 +65,9 @@ class LfsObjectStore:
             dest.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source_path, dest)
             logger.info("LFS object 저장: %s (%d bytes)", oid[:12], size)
-        return LfsPointer(oid=oid, size=size, pointer_bytes=format_lfs_pointer(oid, size))
+        return LfsPointer(
+            oid=oid, size=size, pointer_bytes=format_lfs_pointer(oid, size)
+        )
 
     def exists(self, oid: str) -> bool:
         return self.object_path(oid).exists()
@@ -88,4 +90,6 @@ class LfsObjectStore:
             dest.parent.mkdir(parents=True, exist_ok=True)
             os.replace(tmp_path, dest)
             logger.info("LFS object 저장: %s (%d bytes)", oid[:12], size)
-        return LfsPointer(oid=oid, size=size, pointer_bytes=format_lfs_pointer(oid, size))
+        return LfsPointer(
+            oid=oid, size=size, pointer_bytes=format_lfs_pointer(oid, size)
+        )

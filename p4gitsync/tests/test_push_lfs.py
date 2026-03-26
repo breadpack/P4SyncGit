@@ -1,7 +1,5 @@
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 
 class TestLfsPushOrdering:
     def test_lfs_push_before_git_push(self):
@@ -14,6 +12,7 @@ class TestLfsPushOrdering:
 
         with patch("subprocess.run", side_effect=track_subprocess):
             from subprocess import run
+
             run(["git", "lfs", "push", "--all", "origin", "main"])
             run(["git", "push", "origin", "main"])
 
@@ -33,6 +32,7 @@ class TestLfsPushOrdering:
 
         with patch("subprocess.run", side_effect=fail_lfs_push):
             from subprocess import run
+
             lfs_result = run(["git", "lfs", "push", "--all", "origin", "main"])
             if lfs_result.returncode != 0:
                 pass
