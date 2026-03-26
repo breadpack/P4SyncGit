@@ -81,10 +81,18 @@ class GitCliOperator:
         """orphan branch는 첫 commit 시 자동 생성되므로 별도 작업 불필요."""
         logger.info("orphan branch '%s' 예약 (첫 commit 시 생성)", branch)
 
-    def push(self, branch: str) -> None:
+    def push(self, branch: str, lfs_enabled: bool = False) -> None:
         if not self._remote_url:
             logger.debug("remote_url 미설정 — push 건너뜀: %s", branch)
             return
+        if lfs_enabled:
+            lfs_result = subprocess.run(
+                ["git", "lfs", "push", "--all", "origin", branch],
+                cwd=self._repo_path, capture_output=True, text=True,
+            )
+            if lfs_result.returncode != 0:
+                raise RuntimeError(f"git lfs push 실패: {lfs_result.stderr}")
+            logger.info("LFS push 완료: %s", branch)
         result = self._run_git("push", "origin", branch)
         if result.returncode != 0:
             raise RuntimeError(f"git push 실패: {result.stderr.decode()}")

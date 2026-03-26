@@ -188,7 +188,7 @@ class SyncOrchestrator:
             if self._config.lfs.enabled:
                 git_dir = Path(self._config.git.repo_path) / ".git"
                 self._lfs_store = LfsObjectStore(git_dir=git_dir)
-                self._config.lfs.inject_credentials(str(self._git_operator.repo_path))
+                self._config.lfs.inject_credentials(self._config.git.repo_path)
 
             self._commit_builder = CommitBuilder(
                 p4_client=self._p4_client,
