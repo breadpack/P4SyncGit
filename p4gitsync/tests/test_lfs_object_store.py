@@ -48,7 +48,9 @@ class TestStoreFromStream:
 
 
 class TestStoreFromFile:
-    def test_stores_file_and_removes_source(self, store: LfsObjectStore, tmp_path: Path):
+    def test_stores_file_and_removes_source(
+        self, store: LfsObjectStore, tmp_path: Path
+    ):
         src = tmp_path / "binary.dat"
         src.write_bytes(b"file content here")
         pointer = store.store_from_file(src)

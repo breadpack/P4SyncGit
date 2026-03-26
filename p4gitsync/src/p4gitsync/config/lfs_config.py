@@ -8,17 +8,37 @@ from p4gitsync.lfs.lfs_pointer_utils import format_lfs_pointer
 @dataclass
 class LfsConfig:
     enabled: bool = False
-    extensions: list[str] = field(default_factory=lambda: [
-        ".uasset", ".umap", ".fbx", ".png", ".jpg", ".jpeg",
-        ".tga", ".psd", ".wav", ".mp3", ".ogg", ".mp4",
-        ".bin", ".dll", ".so", ".exe",
-    ])
+    extensions: list[str] = field(
+        default_factory=lambda: [
+            ".uasset",
+            ".umap",
+            ".fbx",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".tga",
+            ".psd",
+            ".wav",
+            ".mp3",
+            ".ogg",
+            ".mp4",
+            ".bin",
+            ".dll",
+            ".so",
+            ".exe",
+        ]
+    )
     size_threshold_bytes: int = 100 * 1024  # 100KB
-    lockable_extensions: list[str] = field(default_factory=lambda: [
-        ".uasset", ".umap",
-    ])
+    lockable_extensions: list[str] = field(
+        default_factory=lambda: [
+            ".uasset",
+            ".umap",
+        ]
+    )
     server_type: str = "builtin"  # "builtin" (GitHub/GitLab) | "self-hosted"
-    server_url: str = ""  # self-hosted LFS 서버 URL (server_type="self-hosted"일 때 사용)
+    server_url: str = (
+        ""  # self-hosted LFS 서버 URL (server_type="self-hosted"일 때 사용)
+    )
     auth_type: str = "git-credential"  # "git-credential" | "token" | "basic"
     auth_token: str = ""
     auth_username: str = ""
@@ -106,6 +126,7 @@ class LfsConfig:
             stacklevel=2,
         )
         import hashlib
+
         oid = hashlib.sha256(content).hexdigest()
         size = len(content)
         return format_lfs_pointer(oid, size)

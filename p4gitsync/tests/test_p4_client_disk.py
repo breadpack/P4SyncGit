@@ -34,8 +34,6 @@ class TestPrintFileToDisk:
 
     def test_raises_on_failure(self, client: P4Client, tmp_path: Path):
         with patch("subprocess.run") as mock_sub:
-            mock_sub.return_value = MagicMock(
-                returncode=1, stderr=b"file not found"
-            )
+            mock_sub.return_value = MagicMock(returncode=1, stderr=b"file not found")
             with pytest.raises(RuntimeError):
                 client.print_file_to_disk("//depot/missing", 1, tmp_path)
