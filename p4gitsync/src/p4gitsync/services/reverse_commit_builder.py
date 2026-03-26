@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from p4gitsync.git.git_operator import GitOperator
+from p4gitsync.lfs.lfs_object_store import LfsObjectStore
+from p4gitsync.lfs.lfs_pointer_utils import is_lfs_pointer, parse_lfs_pointer
 from p4gitsync.p4.p4_submitter import P4Submitter
 from p4gitsync.state.state_store import StateStore
 
@@ -19,12 +22,14 @@ class ReverseCommitBuilder:
         state_store: StateStore,
         stream: str,
         user_mapper=None,
+        lfs_store: LfsObjectStore | None = None,
     ) -> None:
         self._git = git_operator
         self._submitter = p4_submitter
         self._state = state_store
         self._stream = stream
         self._user_mapper = user_mapper
+        self._lfs_store = lfs_store
 
     def sync_commit(self, commit: dict, branch: str) -> int:
         """단일 Git commit을 P4에 submit한다.
@@ -41,6 +46,11 @@ class ReverseCommitBuilder:
         logger.info("Git→P4 동기화 시작: %s (%s)", sha[:12], branch)
 
         file_changes, deletes = self._git.get_commit_files(sha)
+
+        resolved_changes = []
+        for path, content in file_changes:
+            resolved = self._resolve_lfs_content(path, content)
+            resolved_changes.append((path, resolved))
 
         # UserMapper 플러그인 사용 시
         if self._user_mapper:
@@ -66,7 +76,7 @@ class ReverseCommitBuilder:
 
         submitted_cl = self._submitter.submit_changes(
             description=description,
-            file_changes=file_changes,
+            file_changes=resolved_changes,
             deletes=deletes,
             p4_user=p4_user,
         )
@@ -83,6 +93,17 @@ class ReverseCommitBuilder:
             "Git→P4 동기화 완료: %s → CL %d", sha[:12], submitted_cl,
         )
         return submitted_cl
+
+    def _resolve_lfs_content(self, path: str, content: bytes) -> bytes | Path:
+        """LFS 포인터면 실제 파일 경로 반환, 아니면 원본 content 반환."""
+        if not self._lfs_store or not is_lfs_pointer(content):
+            return content
+        try:
+            pointer = parse_lfs_pointer(content)
+            return self._lfs_store.retrieve(pointer.oid)
+        except (ValueError, FileNotFoundError) as e:
+            logger.warning("LFS 파일 복원 실패 (%s): %s", path, e)
+            return content
 
     def _build_description(self, commit: dict) -> str:
         """P4 changelist description을 생성한다.
