@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
-from pathlib import Path
 
 from p4gitsync.config.lfs_config import LfsConfig
 from p4gitsync.git.commit_metadata import CommitMetadata, IntegrationCommitInfo
+from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.git.git_operator import GitOperator
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer, MergeInfo
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
@@ -28,6 +27,7 @@ class CommitBuilder:
         stream: str,
         stream_prefix_len: int | None = None,
         lfs_config: LfsConfig | None = None,
+        lfs_store: LfsObjectStore | None = None,
         merge_analyzer: MergeAnalyzer | None = None,
         batch_print_threshold: int = 50,
         user_mapper=None,
@@ -41,9 +41,9 @@ class CommitBuilder:
         else:
             self._stream_prefix_len = len(stream) + 1
         self._lfs = lfs_config
+        self._lfs_store = lfs_store
         self._merge_analyzer = merge_analyzer
         self._last_has_integration = False
-        self._lfs_initialized = False
         self._user_mapper = user_mapper
 
     @property
@@ -173,50 +173,74 @@ class CommitBuilder:
             elif fa.action in ADD_EDIT_ACTIONS:
                 add_edit_files.append((fa, git_path))
 
-        # batch print 모드: 파일 수가 2개 이상이면 일괄 추출
-        if len(add_edit_files) >= 2:
+        # LFS 대상 파일과 비-LFS 파일 분리
+        lfs_files: list[tuple[P4FileAction, str]] = []
+        non_lfs_files: list[tuple[P4FileAction, str]] = []
+        for fa, git_path in add_edit_files:
+            if self._lfs_store and self._lfs and self._lfs.is_lfs_target(git_path):
+                lfs_files.append((fa, git_path))
+            else:
+                non_lfs_files.append((fa, git_path))
+
+        # 비-LFS 파일: batch print 모드 (파일 수가 2개 이상이면 일괄 추출)
+        if len(non_lfs_files) >= 2:
             file_specs = [
-                f"{fa.depot_path}#{fa.revision}" for fa, _ in add_edit_files
+                f"{fa.depot_path}#{fa.revision}" for fa, _ in non_lfs_files
             ]
             batch_results = self._p4.print_files_batch(file_specs)
 
-            for fa, git_path in add_edit_files:
+            for fa, git_path in non_lfs_files:
                 content = batch_results.get(fa.depot_path)
                 if content is not None:
-                    if self._lfs and self._lfs.enabled and self._lfs.is_lfs_target(git_path):
-                        content = LfsConfig.create_lfs_pointer(content)
                     file_changes.append((git_path, content))
                 else:
                     logger.warning(
                         "파일 내용 추출 실패, 건너뜀: %s#%d", fa.depot_path, fa.revision
                     )
         else:
-            for fa, git_path in add_edit_files:
+            for fa, git_path in non_lfs_files:
                 content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
                 if content is not None:
-                    if self._lfs and self._lfs.enabled and self._lfs.is_lfs_target(git_path):
-                        content = LfsConfig.create_lfs_pointer(content)
                     file_changes.append((git_path, content))
                 else:
                     logger.warning(
                         "파일 내용 추출 실패, 건너뜀: %s#%d", fa.depot_path, fa.revision
                     )
 
-        if self._lfs and self._lfs.enabled and not self._lfs_initialized:
-            self._inject_lfs_config_files(file_changes)
-            self._lfs_initialized = True
+        # LFS 파일: 디스크 기반 개별 처리 (메모리 로드 없음)
+        for fa, git_path in lfs_files:
+            tmp_path = self._p4.print_file_to_disk(
+                fa.depot_path, fa.revision, self._lfs_store.tmp_dir
+            )
+            pointer = self._lfs_store.store_from_file(tmp_path)
+            file_changes.append((git_path, pointer.pointer_bytes))
+
+        # LFS 설정 파일 (.gitattributes, .lfsconfig) 동기화
+        if self._lfs and self._lfs.enabled:
+            expected_attrs = self._lfs.generate_gitattributes().encode("utf-8")
+            current_attrs = self._get_head_file_content(".gitattributes")
+            if current_attrs != expected_attrs:
+                file_changes.insert(0, (".gitattributes", expected_attrs))
+            lfsconfig = self._lfs.generate_lfsconfig()
+            if lfsconfig is not None:
+                expected_lfsconfig = lfsconfig.encode("utf-8")
+                current_lfsconfig = self._get_head_file_content(".lfsconfig")
+                if current_lfsconfig != expected_lfsconfig:
+                    file_changes.append((".lfsconfig", expected_lfsconfig))
 
         return file_changes, deletes
 
-    def _inject_lfs_config_files(
-        self, file_changes: list[tuple[str, bytes]],
-    ) -> None:
-        """첫 commit에 .gitattributes와 .lfsconfig를 자동 삽입."""
-        gitattributes = self._lfs.generate_gitattributes().encode("utf-8")
-        file_changes.insert(0, (".gitattributes", gitattributes))
-        logger.info("LFS .gitattributes 자동 생성 (확장자 %d개)", len(self._lfs.extensions))
-
-        lfsconfig = self._lfs.generate_lfsconfig()
-        if lfsconfig is not None:
-            file_changes.insert(1, (".lfsconfig", lfsconfig.encode("utf-8")))
-            logger.info("LFS .lfsconfig 자동 생성 (서버: %s)", self._lfs.server_url)
+    def _get_head_file_content(self, path: str) -> bytes | None:
+        """HEAD에서 특정 파일의 내용을 읽어 반환. 없거나 실패 시 None."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["git", "show", f"HEAD:{path}"],
+                cwd=self._git._repo_path,
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                return result.stdout
+        except Exception:
+            pass
+        return None
