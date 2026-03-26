@@ -4,6 +4,7 @@ import logging
 
 from p4gitsync.config.sync_config import AppConfig
 from p4gitsync.git.git_operator import GitOperator
+from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.services.commit_builder import CommitBuilder
@@ -27,6 +28,7 @@ class MultiStreamHandler:
         merge_analyzer: MergeAnalyzer,
         event_collector: EventCollector,
         stream_watcher: StreamWatcher | None,
+        lfs_store: LfsObjectStore | None = None,
     ) -> None:
         self._config = config
         self._p4 = p4_client
@@ -35,6 +37,7 @@ class MultiStreamHandler:
         self._merge_analyzer = merge_analyzer
         self._event_collector = event_collector
         self._stream_watcher = stream_watcher
+        self._lfs_store = lfs_store
         self._commit_builders: dict[str, CommitBuilder] = {}
 
     def poll_and_sync(
@@ -76,7 +79,7 @@ class MultiStreamHandler:
         if not self._config.sync.push_after_every_commit and processed_branches:
             for branch in processed_branches:
                 try:
-                    self._git.push(branch)
+                    self._git.push(branch, lfs_enabled=self._config.lfs.enabled)
                 except Exception as e:
                     logger.error("일괄 push 실패 (branch %s): %s", branch, e)
 
@@ -127,7 +130,7 @@ class MultiStreamHandler:
 
         if self._config.sync.push_after_every_commit:
             try:
-                self._git.push(event.branch)
+                self._git.push(event.branch, lfs_enabled=self._config.lfs.enabled)
                 self._state.update_push_status(event.cl, event.stream, "pushed")
             except Exception as e:
                 self._state.update_push_status(event.cl, event.stream, "failed")
@@ -142,6 +145,7 @@ class MultiStreamHandler:
                 state_store=self._state,
                 stream=stream,
                 lfs_config=self._config.lfs if self._config.lfs.enabled else None,
+                lfs_store=self._lfs_store,
                 merge_analyzer=self._merge_analyzer,
             )
         return self._commit_builders[stream]

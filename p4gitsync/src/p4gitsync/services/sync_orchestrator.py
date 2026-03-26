@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 from types import TracebackType
 
 from p4gitsync.config.sync_config import AppConfig
@@ -23,6 +24,7 @@ from p4gitsync.services.db_backup import DatabaseBackup
 from p4gitsync.services.event_collector import EventCollector
 from p4gitsync.services.event_consumer import EventConsumer
 from p4gitsync.services.integrity_checker import IntegrityChecker
+from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.services.multi_stream_sync import MultiStreamHandler
 from p4gitsync.services.reverse_commit_builder import ReverseCommitBuilder
 from p4gitsync.services.stream_watcher import StreamWatcher
@@ -58,6 +60,7 @@ class SyncOrchestrator:
         self._reverse_builders: dict[str, ReverseCommitBuilder] = {}
         self._conflict_detector: ConflictDetector | None = None
         self._user_mapper: UserMapper | None = None
+        self._lfs_store: LfsObjectStore | None = None
         self._unpushed_commits = 0
         self._last_push_time: float = 0.0
         self._running = False
@@ -182,12 +185,18 @@ class SyncOrchestrator:
                 state_store=self._state_store,
             )
 
+            if self._config.lfs.enabled:
+                git_dir = Path(self._config.git.repo_path) / ".git"
+                self._lfs_store = LfsObjectStore(git_dir=git_dir)
+                self._config.lfs.inject_credentials(self._config.git.repo_path)
+
             self._commit_builder = CommitBuilder(
                 p4_client=self._p4_client,
                 git_operator=self._git_operator,
                 state_store=self._state_store,
                 stream=self._config.p4.stream,
                 lfs_config=self._config.lfs if self._config.lfs.enabled else None,
+                lfs_store=self._lfs_store,
                 merge_analyzer=self._merge_analyzer,
                 user_mapper=self._user_mapper,
             )
@@ -250,6 +259,7 @@ class SyncOrchestrator:
                 merge_analyzer=self._merge_analyzer,
                 event_collector=event_collector,
                 stream_watcher=self._stream_watcher,
+                lfs_store=self._lfs_store,
             )
 
             self._maintenance = SyncMaintenanceRunner(
@@ -305,7 +315,7 @@ class SyncOrchestrator:
             logger.info("미완료 push %d건 발견. 재시도 진행.", len(pending))
             for item in pending:
                 try:
-                    self._git_operator.push(item["branch"])
+                    self._git_operator.push(item["branch"], lfs_enabled=self._config.lfs.enabled)
                     self._state_store.update_push_status(
                         item["changelist"], item["stream"], "pushed"
                     )
@@ -341,7 +351,7 @@ class SyncOrchestrator:
             self._unpushed_commits += len(changes)
             if self._should_batch_push():
                 try:
-                    self._git_operator.push(branch)
+                    self._git_operator.push(branch, lfs_enabled=self._config.lfs.enabled)
                     self._mark_batch_pushed(changes, stream)
                     self._unpushed_commits = 0
                     self._last_push_time = time.monotonic()
@@ -387,7 +397,7 @@ class SyncOrchestrator:
 
         if self._config.sync.push_after_every_commit:
             try:
-                self._git_operator.push(branch)
+                self._git_operator.push(branch, lfs_enabled=self._config.lfs.enabled)
                 self._state_store.update_push_status(cl, stream, "pushed")
             except Exception as e:
                 self._state_store.update_push_status(cl, stream, "failed")

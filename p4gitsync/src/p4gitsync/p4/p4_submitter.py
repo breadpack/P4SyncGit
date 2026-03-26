@@ -91,7 +91,10 @@ class P4Submitter:
             depot_path = self._to_depot_path(rel_path)
             is_new = not self._p4.file_exists(depot_path)
 
-            local_path.write_bytes(content)
+            if isinstance(content, Path):
+                shutil.copy2(content, local_path)
+            else:
+                local_path.write_bytes(content)
 
             if is_new:
                 self._p4.p4_add(str(local_path), changelist)
