@@ -40,7 +40,7 @@ class GitOperator(Protocol):
         """parent 없는 orphan branch 생성 (mainline용)."""
         ...
 
-    def push(self, branch: str) -> None:
+    def push(self, branch: str, lfs_enabled: bool = False) -> None:
         """remote push."""
         ...
 
