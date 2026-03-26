@@ -60,6 +60,38 @@ class LfsConfig:
         _, ext = os.path.splitext(path)
         return ext.lower() in self.lockable_extensions
 
+    def inject_credentials(self, repo_path: str) -> None:
+        """auth_type에 따라 git credential-store에 인증 정보 주입."""
+        if self.auth_type == "git-credential" or not self.server_url:
+            return
+
+        from urllib.parse import urlparse
+        import subprocess
+
+        parsed = urlparse(self.server_url)
+        if self.auth_type == "token":
+            username = "token"
+            password = self.auth_token
+        elif self.auth_type == "basic":
+            username = self.auth_username
+            password = self.auth_password
+        else:
+            return
+
+        cred_input = (
+            f"protocol={parsed.scheme}\n"
+            f"host={parsed.netloc}\n"
+            f"username={username}\n"
+            f"password={password}\n"
+            "\n"
+        )
+        subprocess.run(
+            ["git", "credential", "approve"],
+            input=cred_input.encode(),
+            cwd=repo_path,
+            capture_output=True,
+        )
+
     @staticmethod
     def classify_p4_lock_type(file_type: str) -> bool:
         """P4 파일 타입에 +l (exclusive open) 플래그가 있는지 확인."""
