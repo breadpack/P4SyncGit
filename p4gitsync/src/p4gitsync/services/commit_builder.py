@@ -11,6 +11,7 @@ from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.p4.p4_file_action import ADD_EDIT_ACTIONS, DELETE_ACTIONS, P4FileAction
 from p4gitsync.p4.path_utils import depot_to_git_path
+from p4gitsync.p4.virtual_stream_filter import VirtualStreamFilter
 from p4gitsync.state.state_store import StateStore
 
 logger = logging.getLogger("p4gitsync.commit_builder")
@@ -31,14 +32,22 @@ class CommitBuilder:
         merge_analyzer: MergeAnalyzer | None = None,
         batch_print_threshold: int = 50,
         user_mapper=None,
+        virtual_filter: VirtualStreamFilter | None = None,
     ) -> None:
         self._p4 = p4_client
         self._git = git_operator
         self._state = state_store
         self._stream = stream
-        if stream_prefix_len is not None:
+        self._virtual_filter = virtual_filter
+        # virtual stream이면 parent stream 기준으로 경로 변환
+        if virtual_filter:
+            self._depot_stream = virtual_filter.parent_stream
+            self._stream_prefix_len = virtual_filter.parent_prefix_len
+        elif stream_prefix_len is not None:
+            self._depot_stream = stream
             self._stream_prefix_len = stream_prefix_len
         else:
+            self._depot_stream = stream
             self._stream_prefix_len = len(stream) + 1
         self._lfs = lfs_config
         self._lfs_store = lfs_store
@@ -165,7 +174,9 @@ class CommitBuilder:
         # 추가/편집 파일과 삭제 파일 분류
         add_edit_files: list[tuple[P4FileAction, str]] = []
         for fa in info.files:
-            git_path = depot_to_git_path(fa.depot_path, self._stream, self._stream_prefix_len)
+            if self._virtual_filter and not self._virtual_filter.is_included(fa.depot_path):
+                continue
+            git_path = depot_to_git_path(fa.depot_path, self._depot_stream, self._stream_prefix_len)
             if git_path is None:
                 continue
             if fa.action in DELETE_ACTIONS:

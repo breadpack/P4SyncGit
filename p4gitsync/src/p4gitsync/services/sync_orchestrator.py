@@ -16,6 +16,7 @@ from p4gitsync.notifications.silence_detector import SilenceDetector
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.p4.p4_submitter import P4Submitter
+from p4gitsync.p4.virtual_stream_filter import VirtualStreamFilter
 from p4gitsync.services.changelist_poller import ChangelistPoller
 from p4gitsync.services.circuit_breaker import IntegrityCircuitBreaker
 from p4gitsync.services.commit_builder import CommitBuilder
@@ -61,6 +62,8 @@ class SyncOrchestrator:
         self._conflict_detector: ConflictDetector | None = None
         self._user_mapper: UserMapper | None = None
         self._lfs_store: LfsObjectStore | None = None
+        self._poll_stream: str | None = None  # virtual stream이면 parent stream
+        self._virtual_filter = None
         self._unpushed_commits = 0
         self._last_push_time: float = 0.0
         self._running = False
@@ -90,13 +93,14 @@ class SyncOrchestrator:
         return self._circuit_breaker
 
     def start(self) -> None:
-        """서비스 시작: 초기화 -> 정합성 검증 -> 이벤트 루프.
+        """서비스 시작: 초기화 -> 초기 import -> 정합성 검증 -> 이벤트 루프.
 
         Redis가 활성화되면 EventConsumer를 별도 스레드로 실행하고,
         메인 스레드에서는 폴링 fallback 루프를 유지한다.
         """
         if self._state_store is None:
             self._initialize_components()
+        self._run_initial_import_if_needed()
         self._verify_on_startup()
         self._running = True
 
@@ -162,17 +166,74 @@ class SyncOrchestrator:
             except Exception:
                 logger.exception("StateStore 종료 실패")
 
+    def _ensure_p4_workspaces(self) -> None:
+        """config에 지정된 P4 workspace가 없으면 자동 생성."""
+        p4ws_base = Path(self._config.git.repo_path) / ".p4ws"
+        stream = self._config.p4.stream
+
+        read_ws = self._config.p4.workspace
+        read_root = str(p4ws_base / read_ws)
+        Path(read_root).mkdir(parents=True, exist_ok=True)
+        self._p4_client.ensure_workspace(read_ws, stream, read_root)
+
+        submit_ws = self._config.p4.submit_workspace
+        if submit_ws and submit_ws != read_ws:
+            submit_root = str(p4ws_base / submit_ws)
+            Path(submit_root).mkdir(parents=True, exist_ok=True)
+            self._p4_client.ensure_workspace(submit_ws, stream, submit_root)
+
+    def _resolve_virtual_stream(self) -> None:
+        """virtual stream이면 parent stream과 exclude 필터를 설정."""
+        stream = self._config.p4.stream
+        parent, excludes = self._p4_client.resolve_virtual_stream(stream)
+        if parent != stream:
+            self._poll_stream = parent
+            self._virtual_filter = VirtualStreamFilter(parent, excludes)
+        else:
+            self._poll_stream = None
+            self._virtual_filter = None
+
+    def _run_initial_import_if_needed(self) -> None:
+        """미동기화 CL이 대량 존재하면 fast-import로 일괄 처리."""
+        branch = self._config.git.default_branch
+        stream = self._config.p4.stream
+        poll_stream = self._poll_stream or stream
+
+        last_cl = self._state_store.get_last_synced_cl(stream)
+        remaining = self._p4_client.get_changes_after(poll_stream, last_cl)
+        if len(remaining) <= self._config.sync.batch_size:
+            return  # 소량이면 폴링 루프에서 처리
+
+        logger.info(
+            "대량 미동기화 감지: %d건 CL, fast-import로 일괄 처리 시작", len(remaining),
+        )
+
+        from p4gitsync.services.initial_importer import InitialImporter
+
+        importer = InitialImporter(
+            p4_client=self._p4_client,
+            state_store=self._state_store,
+            repo_path=self._config.git.repo_path,
+            stream=stream,
+            config=self._config.initial_import,
+            lfs_config=self._config.lfs if self._config.lfs.enabled else None,
+            lfs_store=self._lfs_store,
+            virtual_filter=self._virtual_filter,
+            p4_config=self._config.p4,
+        )
+        importer.run(branch)
+        logger.info("초기 import 완료: stream=%s", stream)
+
     def _initialize_components(self) -> None:
         try:
             self._state_store = StateStore(self._config.state.db_path)
             self._state_store.initialize()
 
-            self._p4_client = P4Client(
-                port=self._config.p4.port,
-                user=self._config.p4.user,
-                workspace=self._config.p4.workspace,
-            )
+            self._p4_client = self._config.p4.create_client()
             self._p4_client.connect()
+
+            self._ensure_p4_workspaces()
+            self._resolve_virtual_stream()
 
             self._git_operator = self._create_git_operator()
             self._git_operator.init_repo()
@@ -199,6 +260,7 @@ class SyncOrchestrator:
                 lfs_store=self._lfs_store,
                 merge_analyzer=self._merge_analyzer,
                 user_mapper=self._user_mapper,
+                virtual_filter=self._virtual_filter,
             )
 
             event_collector = EventCollector(
@@ -333,7 +395,7 @@ class SyncOrchestrator:
         branch = self._config.git.default_branch
         batch_size = self._config.sync.batch_size
 
-        changes = self._poller.poll(stream, batch_size)
+        changes = self._poller.poll(stream, batch_size, poll_stream=self._poll_stream)
         if not changes:
             return
 
@@ -561,7 +623,7 @@ class SyncOrchestrator:
         self, stream: str,
     ) -> list[tuple[int, list[str]]]:
         """P4 변경사항을 파일 목록과 함께 수집."""
-        changes = self._poller.poll(stream, self._config.sync.batch_size)
+        changes = self._poller.poll(stream, self._config.sync.batch_size, poll_stream=self._poll_stream)
         result = []
         for cl in changes:
             info = self._p4_client.describe(cl)
