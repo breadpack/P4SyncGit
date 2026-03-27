@@ -1,5 +1,4 @@
 import logging
-import subprocess
 import time
 from functools import wraps
 from pathlib import Path, PurePosixPath
@@ -188,23 +187,24 @@ class P4Client:
             )
             return None
 
+    @_auto_reconnect
     def print_file_to_disk(
         self, depot_path: str, revision: int, dest_dir: Path
     ) -> Path:
         """p4 print -o 로 파일을 디스크에 직접 출력. 메모리 로드 없음."""
         filename = PurePosixPath(depot_path).name
         dest_path = Path(dest_dir) / filename
-        result = subprocess.run(
-            [
-                "p4", "-p", self._p4.port, "-u", self._p4.user,
-                "print", "-o", str(dest_path), f"{depot_path}#{revision}",
-            ],
-            capture_output=True,
-        )
-        if result.returncode != 0 or not dest_path.exists():
+        try:
+            self._p4.run_print(
+                "-o", str(dest_path), f"{depot_path}#{revision}",
+            )
+        except P4Exception as e:
             raise RuntimeError(
-                f"p4 print -o 실패: {depot_path}#{revision}: "
-                f"{result.stderr.decode(errors='replace')}"
+                f"p4 print -o 실패: {depot_path}#{revision}: {e}"
+            ) from e
+        if not dest_path.exists():
+            raise RuntimeError(
+                f"p4 print -o 후 파일 미생성: {dest_path}"
             )
         return dest_path
 
