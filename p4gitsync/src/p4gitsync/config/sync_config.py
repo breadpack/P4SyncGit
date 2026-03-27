@@ -69,11 +69,22 @@ def apply_env_overrides(config: dict) -> dict:
 class P4Config:
     port: str = ""
     user: str = ""
+    password: str = ""
     workspace: str = ""
     stream: str = ""
     filelog_batch_size: int = 200
     submit_workspace: str = ""
     submit_as_user: bool = True
+
+    def create_client(self):
+        """P4Client 인스턴스 생성. 연결은 호출자가 수행."""
+        from p4gitsync.p4.p4_client import P4Client
+        return P4Client(
+            port=self.port,
+            user=self.user,
+            workspace=self.workspace,
+            password=self.password,
+        )
 
 
 @dataclass

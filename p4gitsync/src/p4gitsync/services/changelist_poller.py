@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 
 from p4gitsync.p4.p4_client import P4Client
@@ -13,10 +15,15 @@ class ChangelistPoller:
         self._p4 = p4_client
         self._state = state_store
 
-    def poll(self, stream: str, batch_size: int = 50) -> list[int]:
-        """마지막 동기화 CL 이후의 신규 CL 목록 조회 (batch_size 제한)."""
+    def poll(self, stream: str, batch_size: int = 50, poll_stream: str | None = None) -> list[int]:
+        """마지막 동기화 CL 이후의 신규 CL 목록 조회 (batch_size 제한).
+
+        Args:
+            stream: 상태 조회용 stream (virtual stream 이름).
+            poll_stream: CL 조회용 stream. None이면 stream과 동일.
+        """
         last_cl = self._state.get_last_synced_cl(stream)
-        changes = self._p4.get_changes_after(stream, last_cl)
+        changes = self._p4.get_changes_after(poll_stream or stream, last_cl)
         if changes:
             logger.info(
                 "신규 CL %d건 발견 (after CL %d, batch %d)",

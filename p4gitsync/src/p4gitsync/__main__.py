@@ -129,17 +129,12 @@ def _run_sync(config: AppConfig) -> None:
 
 
 def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None = None) -> None:
-    from p4gitsync.p4.p4_client import P4Client
     from p4gitsync.state.state_store import StateStore
 
     state_store = StateStore(config.state.db_path)
     state_store.initialize()
 
-    p4_client = P4Client(
-        port=config.p4.port,
-        user=config.p4.user,
-        workspace=config.p4.workspace,
-    )
+    p4_client = config.p4.create_client()
     p4_client.connect()
 
     try:
@@ -224,7 +219,6 @@ def _run_cutover(config: AppConfig, dry_run: bool) -> None:
 
 
 def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool, include_virtual: bool = False) -> None:
-    from p4gitsync.p4.p4_client import P4Client
     from p4gitsync.services.stream_tree_viewer import StreamTreeViewer
 
     # depot 추출
@@ -235,11 +229,7 @@ def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool, inclu
         parts = stream.rstrip("/").split("/")
         p4_depot = "/".join(parts[:3])  # //depot
 
-    p4_client = P4Client(
-        port=config.p4.port,
-        user=config.p4.user,
-        workspace=config.p4.workspace,
-    )
+    p4_client = config.p4.create_client()
     p4_client.connect()
 
     try:
@@ -270,7 +260,6 @@ def _run_preview(
     no_merge_scan: bool,
     merge_scan_limit: int,
 ) -> None:
-    from p4gitsync.p4.p4_client import P4Client
     from p4gitsync.services.import_preview import ImportPreview
 
     if depot:
@@ -280,11 +269,7 @@ def _run_preview(
         parts = stream.rstrip("/").split("/")
         p4_depot = "/".join(parts[:3])
 
-    p4_client = P4Client(
-        port=config.p4.port,
-        user=config.p4.user,
-        workspace=config.p4.workspace,
-    )
+    p4_client = config.p4.create_client()
     p4_client.connect()
 
     try:

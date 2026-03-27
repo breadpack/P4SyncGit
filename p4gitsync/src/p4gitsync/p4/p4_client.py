@@ -38,14 +38,18 @@ def _auto_reconnect(func: Callable[P, T]) -> Callable[P, T]:
 
 
 class P4Client:
-    def __init__(self, port: str, user: str, workspace: str) -> None:
+    def __init__(self, port: str, user: str, workspace: str, password: str = "") -> None:
         self._p4 = P4()
         self._p4.port = port
         self._p4.user = user
         self._p4.client = workspace
+        self._password = password
 
     def connect(self) -> None:
         self._p4.connect()
+        if self._password:
+            self._p4.password = self._password
+            self._p4.run_login()
         logger.info("P4 연결 성공: %s@%s", self._p4.user, self._p4.port)
 
     def disconnect(self) -> None:
@@ -58,6 +62,9 @@ class P4Client:
         if not self._p4.connected():
             logger.info("P4 연결 끊어짐 — 재연결 시도")
             self._p4.connect()
+            if self._password:
+                self._p4.password = self._password
+                self._p4.run_login()
             logger.info("P4 재연결 성공: %s@%s", self._p4.user, self._p4.port)
 
     def _reconnect_with_backoff(self) -> None:
@@ -117,6 +124,33 @@ class P4Client:
             files=files,
             workspace=desc.get("client", ""),
         )
+
+    @_auto_reconnect
+    def describe_batch(self, changelists: list[int]) -> list[P4ChangeInfo]:
+        """다중 changelist를 단일 호출로 describe. 순서 보장."""
+        if not changelists:
+            return []
+        results = self._p4.run_describe("-s", *[str(cl) for cl in changelists])
+        infos = []
+        for desc in results:
+            files = [
+                P4FileAction(
+                    depot_path=desc["depotFile"][i],
+                    action=desc["action"][i],
+                    file_type=desc["type"][i],
+                    revision=int(desc["rev"][i]),
+                )
+                for i in range(len(desc.get("depotFile", [])))
+            ]
+            infos.append(P4ChangeInfo(
+                changelist=int(desc["change"]),
+                user=desc["user"],
+                description=desc["desc"],
+                timestamp=int(desc["time"]),
+                files=files,
+                workspace=desc.get("client", ""),
+            ))
+        return infos
 
     @_auto_reconnect
     def print_file(self, depot_path: str, revision: int, output_path: str) -> None:
@@ -246,6 +280,41 @@ class P4Client:
         return self._p4.run_users()
 
     @_auto_reconnect
+    def resolve_virtual_stream(self, stream: str) -> tuple[str, list[str]]:
+        """virtual stream이면 (parent_stream, exclude_patterns) 반환.
+
+        일반 stream이면 (stream, []) 반환.
+        exclude_patterns: parent stream prefix를 strip한 후 매칭할 경로 접두사 목록.
+        """
+        info = self.get_stream_info(stream)
+        if not info or info.get("Type") != "virtual":
+            return stream, []
+
+        parent = info.get("Parent", "")
+        if not parent or parent == "none":
+            logger.warning("virtual stream %s에 parent 없음, 일반 stream으로 처리", stream)
+            return stream, []
+
+        paths = info.get("Paths", [])
+        excludes: list[str] = []
+        for path_entry in paths:
+            stripped = path_entry.strip()
+            if stripped.startswith("exclude "):
+                pattern = stripped[len("exclude "):].strip()
+                # "Foo/..." → "Foo/" 형태로 정규화
+                if pattern.endswith("/..."):
+                    pattern = pattern[:-3]  # "Foo/..." → "Foo/"
+                elif pattern.endswith("..."):
+                    pattern = pattern[:-3]  # "Foo..." → "Foo"
+                excludes.append(pattern)
+
+        logger.info(
+            "virtual stream 감지: %s -> parent=%s, excludes=%d개",
+            stream, parent, len(excludes),
+        )
+        return parent, excludes
+
+    @_auto_reconnect
     def get_stream_info(self, stream: str) -> dict:
         """stream 상세 정보 조회."""
         results = self._p4.run_stream("-o", stream)
@@ -341,6 +410,32 @@ class P4Client:
             self._p4.run_change("-d", str(changelist))
         except P4Exception:
             pass  # 이미 삭제됐거나 파일이 남아있으면 무시
+
+    @_auto_reconnect
+    def ensure_workspace(self, name: str, stream: str, root: str) -> bool:
+        """workspace가 없으면 생성, 있으면 stream 매핑 확인/업데이트.
+
+        Returns:
+            True면 새로 생성됨, False면 기존 workspace 사용.
+        """
+        spec = self._p4.fetch_client(name)
+        existing_root = spec.get("Root", "")
+        existing_stream = spec.get("Stream", "")
+
+        if existing_root and existing_stream == stream:
+            logger.info("workspace 이미 존재: %s (stream=%s)", name, stream)
+            return False
+
+        spec["Root"] = root
+        spec["Stream"] = stream
+        spec["Options"] = spec.get("Options", "noallwrite noclobber nocompress unlocked nomodtime normdir")
+        self._p4.save_client(spec)
+
+        if existing_root:
+            logger.info("workspace 업데이트: %s (stream=%s, root=%s)", name, stream, root)
+        else:
+            logger.info("workspace 생성: %s (stream=%s, root=%s)", name, stream, root)
+        return not bool(existing_root)
 
     def get_workspace_root(self, workspace: str | None = None) -> str:
         """workspace의 root 경로 반환."""

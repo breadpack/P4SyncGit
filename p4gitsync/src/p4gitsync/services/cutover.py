@@ -221,11 +221,7 @@ class CutoverManager:
         self._state_store = StateStore(self._config.state.db_path)
         self._state_store.initialize()
 
-        self._p4_client = P4Client(
-            port=self._config.p4.port,
-            user=self._config.p4.user,
-            workspace=self._config.p4.workspace,
-        )
+        self._p4_client = self._config.p4.create_client()
         self._p4_client.connect()
 
         self._git_operator = self._create_git_operator()

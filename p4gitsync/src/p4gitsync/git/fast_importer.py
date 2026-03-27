@@ -16,8 +16,9 @@ class FastImporter:
 
     def start(self) -> None:
         self._proc = subprocess.Popen(
-            ["git", "fast-import", "--force", "--quiet"],
+            ["git", "fast-import", "--force"],
             stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             cwd=self._repo_path,
         )
         logger.info("fast-import 프로세스 시작")
@@ -95,6 +96,45 @@ class FastImporter:
         self._write("\n")
         return self._mark
 
+    def begin_commit(
+        self,
+        branch: str,
+        metadata: CommitMetadata,
+    ) -> int:
+        """스트리밍 commit 시작. mark 번호 반환.
+
+        이후 write_file(), write_delete()를 호출하고,
+        end_commit()으로 마무리한다.
+        """
+        self._mark += 1
+        lines = [
+            f"commit refs/heads/{branch}",
+            f"mark :{self._mark}",
+            f"author {metadata.author_name} <{metadata.author_email}> {metadata.author_timestamp} +0000",
+            f"committer {metadata.author_name} <{metadata.author_email}> {metadata.author_timestamp} +0000",
+        ]
+        msg = metadata.format_message()
+        msg_bytes = msg.encode("utf-8")
+        lines.append(f"data {len(msg_bytes)}")
+
+        self._write("\n".join(lines) + "\n")
+        self._proc.stdin.write(msg_bytes + b"\n")
+        return self._mark
+
+    def write_file(self, path: str, content: bytes) -> None:
+        """현재 commit에 파일 추가. begin_commit() 이후에 호출."""
+        self._write(f"M 100644 inline {path}\n")
+        self._write(f"data {len(content)}\n")
+        self._proc.stdin.write(content + b"\n")
+
+    def write_delete(self, path: str) -> None:
+        """현재 commit에서 파일 삭제. begin_commit() 이후에 호출."""
+        self._write(f"D {path}\n")
+
+    def end_commit(self) -> None:
+        """스트리밍 commit 종료."""
+        self._write("\n")
+
     def checkpoint(self) -> None:
         """체크포인트 생성."""
         self._write("checkpoint\n\n")
@@ -102,11 +142,29 @@ class FastImporter:
 
     def finish(self) -> None:
         """fast-import 프로세스 종료."""
-        if self._proc and self._proc.stdin:
-            self._proc.stdin.close()
-            self._proc.wait()
-            if self._proc.returncode != 0:
-                logger.error("fast-import 프로세스 비정상 종료: %d", self._proc.returncode)
+        if self._proc:
+            try:
+                if self._proc.stdin and not self._proc.stdin.closed:
+                    self._proc.stdin.close()
+            except OSError:
+                pass
+            try:
+                self._proc.wait(timeout=10)
+            except Exception:
+                self._proc.kill()
+            # stderr 출력
+            stderr_output = ""
+            if self._proc.stderr:
+                try:
+                    stderr_output = self._proc.stderr.read().decode(errors="replace").strip()
+                except Exception:
+                    pass
+            if self._proc.returncode and self._proc.returncode != 0:
+                logger.error(
+                    "fast-import 비정상 종료 (exit=%d): %s",
+                    self._proc.returncode,
+                    stderr_output[-500:] if stderr_output else "stderr 없음",
+                )
             else:
                 logger.info("fast-import 완료 (총 %d marks)", self._mark)
             self._proc = None

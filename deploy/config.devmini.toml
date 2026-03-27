@@ -1,0 +1,70 @@
+# P4GitSync 설정: devmini stream 양방향 동기화
+# p4server01:1666 //stream/devmini <-> d:/Projects/CS_CODE_kwonsanggoo.git
+
+[p4]
+port = "p4server01:1666"
+user = "CODE"
+password = "CODE"
+workspace = "CODE_p4gitsync.devmini.read"
+stream = "//stream/devmini"
+submit_workspace = "CODE_p4gitsync.devmini.sync"
+submit_as_user = false
+
+[git]
+repo_path = "d:/Projects/CS_CODE_kwonsanggoo.git"
+remote_url = ""
+default_branch = "main"
+bare = true
+reverse_sync_interval_seconds = 30
+
+[state]
+db_path = "d:/Projects/CS_CODE_kwonsanggoo.git/state.db"
+
+[sync]
+polling_interval_seconds = 30
+batch_size = 50
+push_after_every_commit = false
+file_extraction_mode = "print"
+print_to_sync_threshold = 50
+error_retry_threshold = 3
+
+[logging]
+level = "INFO"
+format = "text"
+
+[api]
+enabled = true
+host = "0.0.0.0"
+port = 8081
+
+[redis]
+enabled = false
+
+[stream_policy]
+auto_discover = false
+include_patterns = ["//stream/devmini"]
+exclude_types = []
+task_stream_policy = "ignore"
+
+[[stream_policy.sync_directions]]
+stream = "//stream/devmini"
+branch = "main"
+direction = "bidirectional"
+
+[lfs]
+enabled = true
+extensions = [
+    ".uasset", ".umap", ".fbx", ".obj",
+    ".png", ".jpg", ".jpeg", ".tga", ".psd", ".bmp", ".exr", ".hdr",
+    ".wav", ".mp3", ".ogg", ".mp4", ".avi", ".mov",
+    ".bin", ".dll", ".so", ".exe", ".pdb", ".a",
+    ".ttf", ".otf",
+    ".bytes", ".spine",
+    ".xlsx", ".xls", ".docx", ".doc", ".pptx",
+    ".zip", ".rar", ".7z",
+]
+size_threshold_bytes = 102400
+lockable_extensions = [".uasset", ".umap", ".fbx", ".psd"]
+
+[user_mapping]
+script = ""

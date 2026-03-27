@@ -98,11 +98,7 @@ def resync_range(
     state_store = StateStore(config.state.db_path)
     state_store.initialize()
 
-    p4_client = P4Client(
-        port=config.p4.port,
-        user=config.p4.user,
-        workspace=config.p4.workspace,
-    )
+    p4_client = config.p4.create_client()
     p4_client.connect()
 
     git_operator = _create_git_operator(config)
