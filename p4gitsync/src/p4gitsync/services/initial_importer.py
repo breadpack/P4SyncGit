@@ -33,8 +33,8 @@ class _CLData:
     cl: int
     info: P4ChangeInfo
     normal_results: list[tuple[str, bytes]] = field(default_factory=list)
+    lfs_results: list[tuple[str, bytes]] = field(default_factory=list)  # (git_path, pointer_bytes)
     deletes: list[str] = field(default_factory=list)
-    lfs_files: list[tuple[P4FileAction, str]] = field(default_factory=list)
     file_count: int = 0
     skipped: bool = False  # 최적화 #3: virtual filter로 파일 0개
 
@@ -371,24 +371,37 @@ class InitialImporter:
             return data
 
         normal_files: list[tuple[P4FileAction, str]] = []
+        lfs_files: list[tuple[P4FileAction, str]] = []
         for fa, git_path in add_edit_files:
             if self._lfs_store and self._lfs and self._lfs.is_lfs_target(git_path):
-                data.lfs_files.append((fa, git_path))
+                lfs_files.append((fa, git_path))
             else:
                 normal_files.append((fa, git_path))
 
         total_normal = len(normal_files)
 
         if total_normal >= _LARGE_CL_THRESHOLD:
-            # 대형 CL: 임시 추가 연결로 병렬 print
             data.normal_results = self._parallel_print(normal_files, p4, cl)
         else:
-            # 일반 CL: 단일 연결로 순차 print
             self._sequential_print(normal_files, p4, data, cl)
+
+        # LFS 파일: batch print로 추출 → pointer 변환 (워커 스레드에서 처리)
+        for chunk_start in range(0, len(lfs_files), _BATCH_PRINT_SIZE):
+            chunk = lfs_files[chunk_start:chunk_start + _BATCH_PRINT_SIZE]
+            file_specs = [f"{fa.depot_path}#{fa.revision}" for fa, _ in chunk]
+            batch_results = p4.print_files_batch(file_specs)
+
+            for fa, git_path in chunk:
+                content = batch_results.get(fa.depot_path)
+                if content is not None:
+                    pointer = self._lfs_store.store_from_stream([content])
+                    data.lfs_results.append((git_path, pointer.pointer_bytes))
+                    del content
+            del batch_results
 
         data.file_count = len(add_edit_files) + len(data.deletes)
         if data.file_count > 100:
-            logger.info("CL %d 추출 완료: %d개 파일", cl, data.file_count)
+            logger.info("CL %d 추출 완료: %d파일 (%d LFS)", cl, data.file_count, len(lfs_files))
         return data
 
     def _sequential_print(
@@ -520,17 +533,8 @@ class InitialImporter:
             fast_importer.write_delete(git_path)
         for git_path, content in cl_data.normal_results:
             fast_importer.write_file(git_path, content)
-
-        for fa, git_path in cl_data.lfs_files:
-            content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
-            if content is not None:
-                if self._lfs_store:
-                    pointer = self._lfs_store.store_from_stream([content])
-                    fast_importer.write_file(git_path, pointer.pointer_bytes)
-                    del content
-                else:
-                    content = LfsConfig.create_lfs_pointer(content)
-                    fast_importer.write_file(git_path, content)
+        for git_path, pointer_bytes in cl_data.lfs_results:
+            fast_importer.write_file(git_path, pointer_bytes)
 
         fast_importer.end_commit()
 
