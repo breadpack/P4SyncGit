@@ -30,7 +30,6 @@ class CommitBuilder:
         lfs_config: LfsConfig | None = None,
         lfs_store: LfsObjectStore | None = None,
         merge_analyzer: MergeAnalyzer | None = None,
-        batch_print_threshold: int = 50,
         user_mapper=None,
         virtual_filter: VirtualStreamFilter | None = None,
     ) -> None:
@@ -58,7 +57,6 @@ class CommitBuilder:
     @property
     def last_has_integration(self) -> bool:
         return self._last_has_integration
-        self._batch_print_threshold = batch_print_threshold
 
     def build_commit(
         self,
@@ -66,8 +64,19 @@ class CommitBuilder:
         branch: str,
         parent_sha: str | None,
     ) -> str:
-        """P4 changelist 정보를 기반으로 Git commit을 생성하고 SHA 반환."""
+        """P4 changelist 정보를 기반으로 Git commit을 생성하고 SHA 반환.
+
+        virtual filter 적용 후 변경 파일이 없으면 빈 문자열("")을 반환하여
+        commit이 스킵되었음을 나타낸다.
+        """
         file_changes, deletes = self._extract_file_changes(info)
+
+        if not file_changes and not deletes:
+            logger.info(
+                "CL %d: 변경 파일 없음 (virtual filter 적용), commit 스킵",
+                info.changelist,
+            )
+            return ""
 
         merge_info = self._analyze_merge(info)
         integration_info = self._build_integration_info(merge_info)

@@ -3,6 +3,7 @@ import queue
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from p4gitsync.config.lfs_config import LfsConfig
@@ -93,6 +94,7 @@ class InitialImporter:
         if last_cl > 0 and all_total_changes:
             # last_cl 이하인 CL 수 = 이미 처리된 수
             already_done = sum(1 for c in all_total_changes if c <= last_cl)
+        del all_total_changes
 
         all_changes = self._p4.get_changes_after(self._poll_stream, last_cl)
 
@@ -130,30 +132,40 @@ class InitialImporter:
         actual_processed = 0
         self._grand_total = grand_total
         self._already_done = already_done
-        self._rate_samples: list[tuple[float, int]] = []
+        self._rate_samples: deque[tuple[float, int]] = deque(maxlen=6)
         for ws in self._worker_stats:
             ws["cls"] = ws["files"] = 0
             ws["elapsed"] = 0.0
 
+        last_seen_cl = 0
         try:
             for i in range(total):
                 # timeout 부여로 Ctrl+C(KeyboardInterrupt) 수신 가능
+                cl_data = None
                 while True:
                     try:
                         cl_data = result_queue.get(timeout=1.0)
                         break
                     except queue.Empty:
+                        if stop_event.is_set():
+                            break
                         continue
+                if cl_data is None:
+                    break
                 if cl_data is _SENTINEL:
                     break
 
                 cl = cl_data.cl
+                last_seen_cl = cl
                 next_i = i + 1
 
                 # 최적화 #3: 빈 CL 스킵
                 if cl_data.skipped:
                     skipped += 1
                     del cl_data
+                    # 빈 CL도 주기적으로 진행 상태 기록 (재시작 시 재처리 방지)
+                    if next_i % self._checkpoint_interval == 0:
+                        self._state.set_last_synced_cl(self._stream, last_seen_cl)
                     self._log_progress(next_i, total, skipped, import_start_time)
                     continue
 
@@ -163,15 +175,17 @@ class InitialImporter:
                     actual_processed = next_i
                 except OSError as e:
                     logger.error("fast-import write 실패: %s", e)
-                    # fast-import stderr 확인
-                    if fast_importer._proc and fast_importer._proc.poll() is not None:
-                        logger.error("fast-import 프로세스 종료됨 (exit=%d)", fast_importer._proc.returncode)
+                    if not fast_importer.is_running:
+                        logger.error("fast-import 프로세스가 비정상 종료됨")
                     break
                 del cl_data
 
                 # checkpoint
                 if next_i % self._checkpoint_interval == 0:
-                    fast_importer.finish()
+                    rc = fast_importer.finish()
+                    if rc != 0:
+                        logger.error("fast-import 체크포인트 실패 (returncode=%d), state 기록 스킵", rc)
+                        break
                     head_sha = self._get_head_sha(branch)
                     self._state.set_last_synced_cl(self._stream, cl, head_sha)
                     self._state.record_commit(cl, head_sha, self._stream, branch)
@@ -199,7 +213,7 @@ class InitialImporter:
 
         finally:
             stop_event.set()
-            fast_importer.finish()
+            final_rc = fast_importer.finish()
             for c in prefetch_clients:
                 try:
                     c.disconnect()
@@ -207,8 +221,10 @@ class InitialImporter:
                     pass
             prefetch_thread.join(timeout=5)
 
-        if last_written_cl > 0:
+        if last_written_cl > 0 and final_rc == 0:
             self._post_import(branch, last_written_cl)
+        elif last_written_cl > 0 and final_rc != 0:
+            logger.error("fast-import 최종 finish 실패 (returncode=%d), state 기록 스킵", final_rc)
         elapsed = time.monotonic() - import_start_time
         logger.info(
             "초기 import 완료: %d/%d CL 처리, %d 스킵, 소요 %s",
@@ -269,7 +285,10 @@ class InitialImporter:
                     stats["elapsed"] += elapsed
                     worker_out[worker_id].put(results)
                 except Exception:
-                    logger.exception("CL 묶음 추출 실패 (worker %d)", worker_id)
+                    logger.exception(
+                        "CL 묶음 추출 실패 (worker %d, CLs=%s)", worker_id, cl_batch,
+                    )
+                    stop_event.set()
                     worker_out[worker_id].put(None)
 
         threads = []
@@ -542,10 +561,6 @@ class InitialImporter:
         """최근 구간 이동 평균 기반 ETA. 최근 5개 샘플 사용."""
         now = time.monotonic()
         self._rate_samples.append((now, done))
-
-        # 오래된 샘플 제거 (최근 5개만 유지)
-        if len(self._rate_samples) > 6:
-            self._rate_samples = self._rate_samples[-6:]
 
         if len(self._rate_samples) < 2:
             return "계산 중..."

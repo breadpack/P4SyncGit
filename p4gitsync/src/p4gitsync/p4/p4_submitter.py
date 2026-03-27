@@ -84,6 +84,15 @@ class P4Submitter:
         """workspace에 파일 변경을 적용하고 P4에 등록."""
         root = Path(self._workspace_root)
 
+        # 변경 대상 파일만 head로 sync하여 workspace를 최신 상태로 맞춤
+        affected_paths = [rel_path for rel_path, _ in file_changes] + list(deletes)
+        for rel_path in affected_paths:
+            depot_path = self._to_depot_path(rel_path)
+            try:
+                self._p4._p4.run_sync(f"{depot_path}@head")
+            except Exception:
+                logger.debug("sync 실패 (신규 파일일 수 있음): %s", depot_path)
+
         for rel_path, content in file_changes:
             local_path = root / rel_path
             local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,7 +125,12 @@ class P4Submitter:
         try:
             result = self._p4._p4.run_where(local_path)
             if result and isinstance(result[0], dict):
-                return result[0].get("depotFile", local_path)
-        except Exception:
-            pass
-        return local_path
+                depot_file = result[0].get("depotFile")
+                if depot_file:
+                    return depot_file
+        except Exception as exc:
+            logger.warning("p4 where 실패: %s (%s)", local_path, exc)
+        raise RuntimeError(
+            f"depot 경로 변환 실패: '{rel_path}' -> p4 where가 유효한 "
+            f"depot 경로를 반환하지 않음 (local_path={local_path})"
+        )
