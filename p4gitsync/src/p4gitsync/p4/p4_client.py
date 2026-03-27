@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 from functools import wraps
 from pathlib import Path, PurePosixPath
@@ -192,8 +193,11 @@ class P4Client:
         self, depot_path: str, revision: int, dest_dir: Path
     ) -> Path:
         """p4 print -o 로 파일을 디스크에 직접 출력. 메모리 로드 없음."""
-        filename = PurePosixPath(depot_path).name
-        dest_path = Path(dest_dir) / filename
+        import tempfile
+        suffix = PurePosixPath(depot_path).suffix or ".tmp"
+        fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, suffix=suffix)
+        os.close(fd)
+        dest_path = Path(tmp_path_str)
         try:
             self._p4.run_print(
                 "-o", str(dest_path), f"{depot_path}#{revision}",
