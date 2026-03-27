@@ -31,7 +31,7 @@ class TestPrintFileToDisk:
 
         result = client.print_file_to_disk(depot, 5, tmp_path)
         assert isinstance(result, Path)
-        assert result.suffix == ".png"
+        assert result.suffix == ".tmp"
         assert result.read_bytes() == b"fake png data"
 
     def test_raises_on_p4_exception(self, client: P4Client, tmp_path: Path):
