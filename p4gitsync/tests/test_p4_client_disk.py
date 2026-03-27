@@ -21,7 +21,6 @@ class TestPrintFileToDisk:
         depot = "//depot/main/art/texture.png"
 
         def fake_run_print(*args):
-            # run_print -o <dest> <depot>#<rev> → 파일 생성 시뮬레이션
             for i, arg in enumerate(args):
                 if arg == "-o" and i + 1 < len(args):
                     dest = Path(args[i + 1])
@@ -32,16 +31,22 @@ class TestPrintFileToDisk:
 
         result = client.print_file_to_disk(depot, 5, tmp_path)
         assert isinstance(result, Path)
-        assert result.name == "texture.png"
+        assert result.suffix == ".png"
         assert result.read_bytes() == b"fake png data"
 
     def test_raises_on_p4_exception(self, client: P4Client, tmp_path: Path):
         client._p4.run_print.side_effect = P4Exception("file not found")
         with pytest.raises(RuntimeError, match="p4 print -o 실패"):
-            client.print_file_to_disk("//depot/missing", 1, tmp_path)
+            client.print_file_to_disk("//depot/missing.bin", 1, tmp_path)
 
     def test_raises_when_file_not_created(self, client: P4Client, tmp_path: Path):
-        # run_print 성공하지만 파일이 생성되지 않은 경우
-        client._p4.run_print.return_value = [{"depotFile": "//depot/x"}]
+        def fake_run_print(*args):
+            # run_print 후 파일 삭제하여 미생성 상태 시뮬레이션
+            for i, arg in enumerate(args):
+                if arg == "-o" and i + 1 < len(args):
+                    Path(args[i + 1]).unlink(missing_ok=True)
+            return [{"depotFile": "//depot/x.bin"}]
+
+        client._p4.run_print.side_effect = fake_run_print
         with pytest.raises(RuntimeError, match="파일 미생성"):
-            client.print_file_to_disk("//depot/x", 1, tmp_path)
+            client.print_file_to_disk("//depot/x.bin", 1, tmp_path)
