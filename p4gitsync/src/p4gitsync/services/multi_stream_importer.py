@@ -341,12 +341,10 @@ class MultiStreamImporter:
             elif fa.action in ADD_EDIT_ACTIONS:
                 if self._lfs and self._lfs.enabled and self._lfs.is_lfs_target(git_path):
                     if self._lfs_store:
-                        tmp_path = self._p4.print_file_to_disk(
-                            fa.depot_path, fa.revision, self._lfs_store.tmp_dir
-                        )
-                        pointer = self._lfs_store.store_from_file(tmp_path)
-                        content = pointer.pointer_bytes
-                        files.append((git_path, content))
+                        content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
+                        if content is not None:
+                            pointer = self._lfs_store.store_from_stream([content])
+                            files.append((git_path, pointer.pointer_bytes))
                     else:
                         # fallback for backward compat (no store provided)
                         content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)

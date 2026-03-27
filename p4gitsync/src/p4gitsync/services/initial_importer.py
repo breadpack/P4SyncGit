@@ -522,15 +522,13 @@ class InitialImporter:
             fast_importer.write_file(git_path, content)
 
         for fa, git_path in cl_data.lfs_files:
-            if self._lfs_store:
-                tmp_path = self._p4.print_file_to_disk(
-                    fa.depot_path, fa.revision, self._lfs_store.tmp_dir
-                )
-                pointer = self._lfs_store.store_from_file(tmp_path)
-                fast_importer.write_file(git_path, pointer.pointer_bytes)
-            else:
-                content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
-                if content is not None:
+            content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
+            if content is not None:
+                if self._lfs_store:
+                    pointer = self._lfs_store.store_from_stream([content])
+                    fast_importer.write_file(git_path, pointer.pointer_bytes)
+                    del content
+                else:
                     content = LfsConfig.create_lfs_pointer(content)
                     fast_importer.write_file(git_path, content)
 

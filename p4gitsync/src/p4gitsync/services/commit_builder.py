@@ -227,13 +227,12 @@ class CommitBuilder:
                         "파일 내용 추출 실패, 건너뜀: %s#%d", fa.depot_path, fa.revision
                     )
 
-        # LFS 파일: 디스크 기반 개별 처리 (메모리 로드 없음)
+        # LFS 파일: bytes로 추출 후 LFS store에 저장
         for fa, git_path in lfs_files:
-            tmp_path = self._p4.print_file_to_disk(
-                fa.depot_path, fa.revision, self._lfs_store.tmp_dir
-            )
-            pointer = self._lfs_store.store_from_file(tmp_path)
-            file_changes.append((git_path, pointer.pointer_bytes))
+            content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
+            if content is not None:
+                pointer = self._lfs_store.store_from_stream([content])
+                file_changes.append((git_path, pointer.pointer_bytes))
 
         # LFS 설정 파일 (.gitattributes, .lfsconfig) 동기화
         if self._lfs and self._lfs.enabled:
