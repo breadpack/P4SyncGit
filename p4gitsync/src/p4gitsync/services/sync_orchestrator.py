@@ -255,7 +255,8 @@ class SyncOrchestrator:
             )
 
             if self._config.lfs.enabled:
-                git_dir = Path(self._config.git.repo_path) / ".git"
+                repo_path = Path(self._config.git.repo_path)
+                git_dir = repo_path if self._config.git.bare else repo_path / ".git"
                 self._lfs_store = LfsObjectStore(git_dir=git_dir)
                 self._config.lfs.inject_credentials(self._config.git.repo_path)
 
