@@ -165,7 +165,7 @@ class InitialImporter:
                     del cl_data
                     # 빈 CL도 주기적으로 진행 상태 기록 (재시작 시 재처리 방지)
                     if next_i % self._checkpoint_interval == 0:
-                        self._state.set_last_synced_cl(self._stream, last_seen_cl)
+                        self._state.set_last_synced_cl(self._stream, last_seen_cl, "")
                     self._log_progress(next_i, total, skipped, import_start_time)
                     continue
 
