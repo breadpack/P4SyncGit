@@ -141,39 +141,42 @@ class FastImporter:
         if self._proc and self._proc.stdin and not self._proc.stdin.closed:
             self._proc.stdin.flush()
 
-    def finish(self) -> None:
-        """fast-import 프로세스 종료."""
-        if self._proc:
+    def finish(self) -> int:
+        """fast-import 프로세스 종료. returncode 반환 (정상=0, 프로세스 없음=0)."""
+        if not self._proc:
+            return 0
+        try:
+            if self._proc.stdin and not self._proc.stdin.closed:
+                self._proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self._proc.wait(timeout=10)
+        except Exception:
+            self._proc.kill()
+        # stderr 출력
+        stderr_output = ""
+        if self._proc.stderr:
             try:
-                if self._proc.stdin and not self._proc.stdin.closed:
-                    self._proc.stdin.close()
-            except OSError:
-                pass
-            try:
-                self._proc.wait(timeout=10)
+                stderr_output = self._proc.stderr.read().decode(errors="replace").strip()
             except Exception:
-                self._proc.kill()
-            # stderr 출력
-            stderr_output = ""
-            if self._proc.stderr:
+                pass
+            finally:
                 try:
-                    stderr_output = self._proc.stderr.read().decode(errors="replace").strip()
-                except Exception:
+                    self._proc.stderr.close()
+                except OSError:
                     pass
-                finally:
-                    try:
-                        self._proc.stderr.close()
-                    except OSError:
-                        pass
-            if self._proc.returncode and self._proc.returncode != 0:
-                logger.error(
-                    "fast-import 비정상 종료 (exit=%d): %s",
-                    self._proc.returncode,
-                    stderr_output[-500:] if stderr_output else "stderr 없음",
-                )
-            else:
-                logger.info("fast-import 완료 (총 %d marks)", self._mark)
-            self._proc = None
+        rc = self._proc.returncode or 0
+        if rc != 0:
+            logger.error(
+                "fast-import 비정상 종료 (exit=%d): %s",
+                rc,
+                stderr_output[-500:] if stderr_output else "stderr 없음",
+            )
+        else:
+            logger.info("fast-import 완료 (총 %d marks)", self._mark)
+        self._proc = None
+        return rc
 
     @property
     def is_running(self) -> bool:
