@@ -379,13 +379,50 @@ class InitialImporter:
                 normal_files.append((fa, git_path))
 
         total_normal = len(normal_files)
+        total_lfs = len(lfs_files)
 
-        if total_normal >= _LARGE_CL_THRESHOLD:
-            data.normal_results = self._parallel_print(normal_files, p4, cl)
+        # normal과 LFS를 동시 추출 (각각 다른 P4 연결 사용)
+        if total_lfs > 0 and total_normal > 0:
+            lfs_p4 = self._create_prefetch_clients(1)[0]
+            lfs_thread = threading.Thread(
+                target=self._extract_lfs_files,
+                args=(lfs_files, lfs_p4, data, cl),
+                name=f"lfs-{cl}",
+                daemon=True,
+            )
+            lfs_thread.start()
+
+            # normal은 기존 연결로 처리
+            if total_normal >= _LARGE_CL_THRESHOLD:
+                data.normal_results = self._parallel_print(normal_files, p4, cl)
+            else:
+                self._sequential_print(normal_files, p4, data, cl)
+
+            lfs_thread.join()
+            lfs_p4.disconnect()
         else:
-            self._sequential_print(normal_files, p4, data, cl)
+            # 한쪽만 있으면 순차 처리
+            if total_normal >= _LARGE_CL_THRESHOLD:
+                data.normal_results = self._parallel_print(normal_files, p4, cl)
+            elif total_normal > 0:
+                self._sequential_print(normal_files, p4, data, cl)
 
-        # LFS 파일: batch print로 추출 → pointer 변환 (워커 스레드에서 처리)
+            if total_lfs > 0:
+                self._extract_lfs_files(lfs_files, p4, data, cl)
+
+        data.file_count = len(add_edit_files) + len(data.deletes)
+        if data.file_count > 100:
+            logger.info("CL %d 추출 완료: %d파일 (%d LFS)", cl, data.file_count, total_lfs)
+        return data
+
+    def _extract_lfs_files(
+        self,
+        lfs_files: list[tuple[P4FileAction, str]],
+        p4: P4Client,
+        data: _CLData,
+        cl: int,
+    ) -> None:
+        """LFS 파일을 batch print → pointer 변환."""
         for chunk_start in range(0, len(lfs_files), _BATCH_PRINT_SIZE):
             chunk = lfs_files[chunk_start:chunk_start + _BATCH_PRINT_SIZE]
             file_specs = [f"{fa.depot_path}#{fa.revision}" for fa, _ in chunk]
@@ -398,11 +435,6 @@ class InitialImporter:
                     data.lfs_results.append((git_path, pointer.pointer_bytes))
                     del content
             del batch_results
-
-        data.file_count = len(add_edit_files) + len(data.deletes)
-        if data.file_count > 100:
-            logger.info("CL %d 추출 완료: %d파일 (%d LFS)", cl, data.file_count, len(lfs_files))
-        return data
 
     def _sequential_print(
         self,
