@@ -124,10 +124,17 @@ class SyncOrchestrator:
             try:
                 self._maintenance.run()
                 direction = self._get_stream_direction(stream)
-                if direction != "git_to_p4":
-                    self._poll_and_sync()
-                if direction in ("bidirectional", "git_to_p4"):
+
+                # bidirectional이면 forward sync 전에 충돌 감지 수행
+                if direction == "bidirectional":
+                    has_conflict = self._check_and_handle_conflicts(stream, branch)
+                    if not has_conflict:
+                        self._poll_and_sync()
+                        self._poll_reverse_sync(stream, branch)
+                elif direction == "git_to_p4":
                     self._poll_reverse_sync(stream, branch)
+                else:
+                    self._poll_and_sync()
             except Exception:
                 logger.exception("폴링 루프 에러")
             time.sleep(self._config.sync.polling_interval_seconds)
@@ -201,7 +208,8 @@ class SyncOrchestrator:
 
         last_cl = self._state_store.get_last_synced_cl(stream)
         remaining = self._p4_client.get_changes_after(poll_stream, last_cl)
-        if len(remaining) <= self._config.sync.batch_size:
+        fast_import_threshold = max(self._config.sync.batch_size * 10, 500)
+        if len(remaining) <= fast_import_threshold:
             return  # 소량이면 폴링 루프에서 처리
 
         logger.info(
@@ -444,10 +452,13 @@ class SyncOrchestrator:
 
         sha = self._commit_builder.build_commit(info, branch, parent_sha)
 
-        self._state_store.record_commit(
-            cl, sha, stream, branch,
-            has_integration=self._commit_builder.last_has_integration,
-        )
+        if sha:
+            self._state_store.record_commit(
+                cl, sha, stream, branch,
+                has_integration=self._commit_builder.last_has_integration,
+            )
+        else:
+            logger.debug("빈 CL 스킵 (파일 0개): CL %d", cl)
         self._state_store.set_last_synced_cl(stream, cl, sha)
 
         if self._silence_detector:
@@ -553,6 +564,12 @@ class SyncOrchestrator:
             state_store=self._state_store,
         )
 
+        if not self._config.git.remote_url:
+            logger.warning(
+                "remote_url이 설정되지 않음: 양방향 동기화에서 fetch를 스킵하고 "
+                "로컬 branch HEAD 변경만 감지합니다."
+            )
+
         logger.info("양방향 동기화 컴포넌트 초기화 완료")
 
     def _get_stream_direction(self, stream: str) -> str:
@@ -566,8 +583,51 @@ class SyncOrchestrator:
                 state_store=self._state_store,
                 stream=stream,
                 user_mapper=self._user_mapper,
+                lfs_store=self._lfs_store,
             )
         return self._reverse_builders[stream]
+
+    def _check_and_handle_conflicts(self, stream: str, branch: str) -> bool:
+        """Forward sync 전에 P4/Git 양쪽 변경을 비교하여 충돌을 감지한다.
+
+        Returns:
+            True이면 충돌 발생 (forward/reverse 모두 스킵해야 함).
+        """
+        if self._git_change_detector is None or self._conflict_detector is None:
+            return False
+
+        # 이미 충돌 상태이면 해결 여부만 확인
+        conflict = self._state_store.get_conflict(branch)
+        if conflict:
+            self._check_conflict_resolved(branch, conflict)
+            return True
+
+        # Git 쪽 새 commit 감지 (fetch 포함)
+        if self._config.git.remote_url:
+            try:
+                self._git_change_detector.fetch()
+            except Exception as e:
+                logger.error("git fetch 실패 (충돌 감지 단계): %s", e)
+                return False
+
+        new_commits = self._git_change_detector.detect_new_commits(branch)
+        if not new_commits:
+            return False
+
+        # P4 쪽 변경 수집
+        p4_changes = self._collect_p4_changes_with_files(stream)
+        if not p4_changes:
+            return False
+
+        # 충돌 검사
+        conflict_info = self._conflict_detector.detect(
+            branch, p4_changes, new_commits,
+        )
+        if conflict_info is not None:
+            self._handle_conflict(conflict_info, stream)
+            return True
+
+        return False
 
     def _poll_reverse_sync(self, stream: str, branch: str) -> None:
         """Git→P4 역방향 동기화 폴링."""
@@ -584,11 +644,12 @@ class SyncOrchestrator:
             self._check_conflict_resolved(branch, conflict)
             return
 
-        try:
-            self._git_change_detector.fetch()
-        except Exception as e:
-            logger.error("git fetch 실패: %s", e)
-            return
+        if self._config.git.remote_url:
+            try:
+                self._git_change_detector.fetch()
+            except Exception as e:
+                logger.error("git fetch 실패: %s", e)
+                return
 
         new_commits = self._git_change_detector.detect_new_commits(branch)
         if not new_commits:

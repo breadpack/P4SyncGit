@@ -19,20 +19,30 @@ _MAX_RECONNECT_RETRIES = 3
 _BASE_RECONNECT_DELAY = 1.0
 
 
+_MAX_AUTO_RECONNECT_ATTEMPTS = 3
+
+
 def _auto_reconnect(func: Callable[P, T]) -> Callable[P, T]:
-    """P4 연결 끊김 시 자동 재연결 후 재시도하는 데코레이터."""
+    """P4 연결 끊김 시 자동 재연결 후 재시도하는 데코레이터 (최대 3회)."""
 
     @wraps(func)
     def wrapper(self: "P4Client", *args: P.args, **kwargs: P.kwargs) -> T:
         self._ensure_connected()
-        try:
-            return func(self, *args, **kwargs)
-        except P4Exception as e:
-            if not self._p4.connected():
-                logger.warning("P4 연결 끊김 감지, 재연결 시도: %s", e)
-                self._reconnect_with_backoff()
+        last_error: P4Exception | None = None
+        for attempt in range(1, _MAX_AUTO_RECONNECT_ATTEMPTS + 1):
+            try:
                 return func(self, *args, **kwargs)
-            raise
+            except P4Exception as e:
+                if not self._p4.connected():
+                    logger.warning(
+                        "P4 연결 끊김 감지, 재연결 시도 %d/%d: %s",
+                        attempt, _MAX_AUTO_RECONNECT_ATTEMPTS, e,
+                    )
+                    last_error = e
+                    self._reconnect_with_backoff()
+                else:
+                    raise
+        raise last_error  # type: ignore[misc]
 
     return wrapper
 
@@ -77,6 +87,9 @@ class P4Client:
                 if self._p4.connected():
                     self._p4.disconnect()
                 self._p4.connect()
+                if self._password:
+                    self._p4.password = self._password
+                    self._p4.run_login()
                 logger.info("P4 재연결 성공")
                 return
             except P4Exception as e:
@@ -102,11 +115,9 @@ class P4Client:
         )
         return sorted(int(r["change"]) for r in results)
 
-    @_auto_reconnect
-    def describe(self, changelist: int) -> P4ChangeInfo:
-        """changelist 상세 정보 (파일 목록, action, 설명, 작성자)."""
-        results = self._p4.run_describe("-s", str(changelist))
-        desc = results[0]
+    @staticmethod
+    def _parse_describe_result(desc: dict) -> P4ChangeInfo:
+        """P4 describe 결과 dict를 P4ChangeInfo로 변환."""
         files = [
             P4FileAction(
                 depot_path=desc["depotFile"][i],
@@ -126,31 +137,18 @@ class P4Client:
         )
 
     @_auto_reconnect
+    def describe(self, changelist: int) -> P4ChangeInfo:
+        """changelist 상세 정보 (파일 목록, action, 설명, 작성자)."""
+        results = self._p4.run_describe("-s", str(changelist))
+        return self._parse_describe_result(results[0])
+
+    @_auto_reconnect
     def describe_batch(self, changelists: list[int]) -> list[P4ChangeInfo]:
         """다중 changelist를 단일 호출로 describe. 순서 보장."""
         if not changelists:
             return []
         results = self._p4.run_describe("-s", *[str(cl) for cl in changelists])
-        infos = []
-        for desc in results:
-            files = [
-                P4FileAction(
-                    depot_path=desc["depotFile"][i],
-                    action=desc["action"][i],
-                    file_type=desc["type"][i],
-                    revision=int(desc["rev"][i]),
-                )
-                for i in range(len(desc.get("depotFile", [])))
-            ]
-            infos.append(P4ChangeInfo(
-                changelist=int(desc["change"]),
-                user=desc["user"],
-                description=desc["desc"],
-                timestamp=int(desc["time"]),
-                files=files,
-                workspace=desc.get("client", ""),
-            ))
-        return infos
+        return [self._parse_describe_result(desc) for desc in results]
 
     @_auto_reconnect
     def print_file(self, depot_path: str, revision: int, output_path: str) -> None:
