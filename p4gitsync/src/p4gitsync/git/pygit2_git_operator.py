@@ -279,7 +279,6 @@ class Pygit2GitOperator:
         subprocess.run(
             ["git", "gc", "--auto"],
             cwd=self._repo_path,
-            check=True,
             capture_output=True,
         )
         self._repo = pygit2.Repository(self._repo_path)
@@ -290,7 +289,6 @@ class Pygit2GitOperator:
         subprocess.run(
             ["git", "repack", "-a", "-d"],
             cwd=self._repo_path,
-            check=True,
             capture_output=True,
         )
         self._repo = pygit2.Repository(self._repo_path)
