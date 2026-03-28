@@ -412,14 +412,14 @@ class InitialImporter:
             lfs_thread.start()
 
             if total_normal >= _LARGE_CL_THRESHOLD:
-                data.normal_results = self._parallel_print(normal_files, p4, cl)
+                data.normal_results = self._parallel_print(normal_files, p4, cl, lfs_p4)
             else:
                 self._sequential_print(normal_files, p4, data, cl)
 
             lfs_thread.join()
         else:
             if total_normal >= _LARGE_CL_THRESHOLD:
-                data.normal_results = self._parallel_print(normal_files, p4, cl)
+                data.normal_results = self._parallel_print(normal_files, p4, cl, lfs_p4)
             elif total_normal > 0:
                 self._sequential_print(normal_files, p4, data, cl)
 
@@ -477,18 +477,13 @@ class InitialImporter:
         normal_files: list[tuple[P4FileAction, str]],
         own_p4: P4Client,
         cl: int,
+        extra_p4: P4Client | None = None,
     ) -> list[tuple[str, bytes]]:
         """여러 P4 연결로 병렬 batch print. 대형 CL용."""
-        extra_count = min(_PREFETCH_WORKERS - 1, 3)
-        extra_clients: list[P4Client] = []
-        for _ in range(extra_count):
-            try:
-                c = self._create_prefetch_clients(1)[0]
-                extra_clients.append(c)
-            except Exception:
-                break
-
-        all_clients = [own_p4] + extra_clients
+        # 기존 연결을 활용 (LFS 전용 연결이 유휴 상태일 때)
+        all_clients = [own_p4]
+        if extra_p4:
+            all_clients.append(extra_p4)
         num_connections = len(all_clients)
         logger.info(
             "CL %d: 대형 CL (%d파일), %d개 연결로 병렬 print",
@@ -545,13 +540,6 @@ class InitialImporter:
 
         for t in threads:
             t.join()
-
-        # 임시 연결 해제
-        for c in extra_clients:
-            try:
-                c.disconnect()
-            except Exception:
-                pass
 
         return all_results
 
