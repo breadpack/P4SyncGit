@@ -25,8 +25,10 @@ class ChangelistPoller:
         last_cl = self._state.get_last_synced_cl(stream)
         changes = self._p4.get_changes_after(poll_stream or stream, last_cl)
         if changes:
+            remaining = len(changes)
+            batch = min(remaining, batch_size)
             logger.info(
-                "신규 CL %d건 발견 (after CL %d, batch %d)",
-                len(changes), last_cl, min(len(changes), batch_size),
+                "미동기화 CL %d건 (batch %d건 처리 예정, last CL %d)",
+                remaining, batch, last_cl,
             )
         return changes[:batch_size]
