@@ -408,15 +408,25 @@ class SyncOrchestrator:
         if not changes:
             return
 
+        processed = 0
         for cl in changes:
             try:
                 self._process_changelist(cl, stream, branch)
+                processed += 1
             except Exception as e:
                 retry_count = self._state_store.record_sync_error(cl, stream, str(e))
                 logger.error("CL %d 처리 실패 (retry=%d): %s", cl, retry_count, e)
                 if retry_count >= self._config.sync.error_retry_threshold:
                     self._notifier.send_error(cl, stream, str(e))
                 break
+
+        if processed > 0:
+            remaining = len(changes) - processed
+            last_cl = self._state_store.get_last_synced_cl(stream)
+            logger.info(
+                "폴링 완료: %d건 처리 (last CL %d, 미처리 %d건 남음)",
+                processed, last_cl, remaining,
+            )
 
         if not self._config.sync.push_after_every_commit:
             self._unpushed_commits += len(changes)

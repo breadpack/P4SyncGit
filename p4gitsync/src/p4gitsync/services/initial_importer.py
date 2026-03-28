@@ -174,10 +174,12 @@ class InitialImporter:
                     last_written_cl = cl
                     actual_processed = next_i
                 except OSError as e:
-                    logger.error("fast-import write 실패: %s", e)
-                    if not fast_importer.is_running:
-                        logger.error("fast-import 프로세스가 비정상 종료됨")
-                    break
+                    logger.error("fast-import write 실패 (CL %d): %s", cl, e)
+                    # fast-import 재시작하여 계속 진행
+                    fast_importer.finish()
+                    fast_importer = FastImporter(self._repo_path)
+                    fast_importer.start()
+                    logger.info("fast-import 재시작 후 계속 진행")
                 del cl_data
 
                 # checkpoint
