@@ -116,6 +116,11 @@ class InitialImporter:
         stop_event = threading.Event()
 
         prefetch_clients = self._create_prefetch_clients(_PREFETCH_WORKERS)
+        # LFS 병렬 추출용 워커별 전용 연결 (재사용)
+        self._lfs_clients: list[P4Client] = []
+        if self._lfs_store and self._lfs and self._lfs.enabled:
+            self._lfs_clients = self._create_prefetch_clients(_PREFETCH_WORKERS)
+
         prefetch_thread = threading.Thread(
             target=self._prefetch_loop,
             args=(all_changes, prefetch_clients, result_queue, stop_event),
@@ -221,6 +226,12 @@ class InitialImporter:
                     c.disconnect()
                 except Exception:
                     pass
+            for c in self._lfs_clients:
+                try:
+                    c.disconnect()
+                except Exception:
+                    pass
+            self._lfs_clients = []
             prefetch_thread.join(timeout=5)
 
         if last_written_cl > 0 and final_rc == 0:
@@ -271,8 +282,11 @@ class InitialImporter:
 
         worker_stats = self._worker_stats
 
+        lfs_clients = self._lfs_clients
+
         def worker_fn(worker_id: int) -> None:
             p4 = clients[worker_id]
+            lfs_p4 = lfs_clients[worker_id] if worker_id < len(lfs_clients) else None
             stats = worker_stats[worker_id]
             while not stop_event.is_set():
                 cl_batch = worker_in[worker_id].get()
@@ -280,7 +294,7 @@ class InitialImporter:
                     break
                 try:
                     t0 = time.monotonic()
-                    results = self._extract_cl_batch(cl_batch, p4)
+                    results = self._extract_cl_batch(cl_batch, p4, lfs_p4)
                     elapsed = time.monotonic() - t0
                     stats["cls"] += len(results)
                     stats["files"] += sum(d.file_count for d in results)
@@ -341,16 +355,20 @@ class InitialImporter:
 
     # ── CL 추출 ──────────────────────────────────────
 
-    def _extract_cl_batch(self, cls: list[int], p4: P4Client) -> list[_CLData]:
+    def _extract_cl_batch(
+        self, cls: list[int], p4: P4Client, lfs_p4: P4Client | None = None,
+    ) -> list[_CLData]:
         """CL 묶음을 일괄 describe 후 각각 batch print."""
         infos = p4.describe_batch(cls)
         results = []
         for info in infos:
-            data = self._build_cl_data(info, p4)
+            data = self._build_cl_data(info, p4, lfs_p4)
             results.append(data)
         return results
 
-    def _build_cl_data(self, info: P4ChangeInfo, p4: P4Client) -> _CLData:
+    def _build_cl_data(
+        self, info: P4ChangeInfo, p4: P4Client, lfs_p4: P4Client | None = None,
+    ) -> _CLData:
         """P4ChangeInfo로부터 파일을 batch print로 추출."""
         cl = info.changelist
         data = _CLData(cl=cl, info=info)
@@ -384,8 +402,7 @@ class InitialImporter:
         total_lfs = len(lfs_files)
 
         # normal과 LFS를 동시 추출 (각각 다른 P4 연결 사용)
-        if total_lfs > 0 and total_normal > 0:
-            lfs_p4 = self._create_prefetch_clients(1)[0]
+        if total_lfs > 0 and total_normal > 0 and lfs_p4:
             lfs_thread = threading.Thread(
                 target=self._extract_lfs_files,
                 args=(lfs_files, lfs_p4, data, cl),
@@ -394,23 +411,20 @@ class InitialImporter:
             )
             lfs_thread.start()
 
-            # normal은 기존 연결로 처리
             if total_normal >= _LARGE_CL_THRESHOLD:
                 data.normal_results = self._parallel_print(normal_files, p4, cl)
             else:
                 self._sequential_print(normal_files, p4, data, cl)
 
             lfs_thread.join()
-            lfs_p4.disconnect()
         else:
-            # 한쪽만 있으면 순차 처리
             if total_normal >= _LARGE_CL_THRESHOLD:
                 data.normal_results = self._parallel_print(normal_files, p4, cl)
             elif total_normal > 0:
                 self._sequential_print(normal_files, p4, data, cl)
 
             if total_lfs > 0:
-                self._extract_lfs_files(lfs_files, p4, data, cl)
+                self._extract_lfs_files(lfs_files, lfs_p4 or p4, data, cl)
 
         data.file_count = len(add_edit_files) + len(data.deletes)
         if data.file_count > 100:
