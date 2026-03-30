@@ -13,7 +13,6 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "slack-sdk>=3.27",
     "redis>=5.0",
-    "tomli_w>=1.0",
 ]
 
 [project.optional-dependencies]
