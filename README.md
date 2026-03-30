@@ -35,66 +35,125 @@ Perforce(Helix Core) Stream의 전체 히스토리를 Git에 정확히 재현하
 
 ## Quick Start
 
-### 원클릭 설치
+### 1. 설치
 
 ```bash
-# Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/breadpack/P4SyncGit/master/deploy/quickstart.sh | bash
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/breadpack/P4SyncGit/master/deploy/quickstart.ps1 | iex
-```
-
-실행하면 `p4gitsync/` 폴더에 설정 파일이 생성됩니다. 설정을 수정한 뒤 시작하세요:
-
-```bash
-cd p4gitsync
-# 1. config.toml 수정 — P4 서버, stream, workspace
-# 2. user_mapper.py 수정 — workspace 패턴, 이메일 도메인
-docker compose up -d
-```
-
-### Docker Compose (수동)
-
-```bash
-git clone https://github.com/breadpack/P4SyncGit.git
-cd P4SyncGit/deploy
-
-# config.toml, user_mapper.py 수정
-docker compose build
-docker compose up -d
-
-# 초기 히스토리 import (최초 1회)
-docker compose exec p4gitsync p4gitsync import --stream //YourDepot/main
-
-# 상태 확인
-curl http://localhost:8080/api/health
-```
-
-### pip 설치
-
-```bash
-cd P4SyncGit/p4gitsync
-pip install .
-p4gitsync --config config.toml run
-```
-
-### 바이너리 빌드
-
-```bash
+# 바이너리 빌드 (Python 3.12+ 필요)
 cd P4SyncGit/p4gitsync
 
 # Windows
 build.cmd     # → dist\p4gitsync.exe
 
-# Linux / macOS
+# Linux
 ./build.sh    # → dist/p4gitsync
 ```
 
-빌드 결과물 + `config.toml` + `user_mapper.py`만 배포하면 됩니다. 실행 환경에 git CLI만 필요합니다.
+또는 pip으로 설치:
 
 ```bash
-./p4gitsync --config config.toml run
+cd P4SyncGit/p4gitsync
+pip install .
+```
+
+### 2. 대화형 설정 (setup)
+
+```bash
+p4gitsync setup --config config.toml
+```
+
+P4 서버 연결, Git 저장소, 동기화 방향, LFS 설정을 대화형으로 구성합니다.
+P4 연결 테스트, virtual stream 자동 감지, binary 확장자 자동 감지가 포함됩니다.
+
+```
+[1/5] P4 서버 설정
+  P4 서버 주소: p4server01:1666
+  P4 계정: CODE
+  P4 비밀번호: ****
+  P4 Stream: //stream/devmini
+  연결 테스트 중... OK (virtual stream 감지: parent=//stream/dev)
+
+[2/5] Git 저장소 설정
+  Git repo 경로: /data/project.git
+  Bare repo? (Y/n): Y
+  ...
+```
+
+기존 config.toml이 있으면 메뉴에서 원하는 섹션만 수정할 수 있습니다.
+
+### 3. 서비스 등록 및 시작
+
+```bash
+# 서비스 등록 (Windows: NSSM, Linux: systemd)
+p4gitsync service install --config config.toml --name p4gitsync-dev
+
+# 서비스 시작
+p4gitsync service start --name p4gitsync-dev
+```
+
+서비스로 등록하면 OS 부팅 시 자동 시작되고, 비정상 종료 시 자동 재시작됩니다.
+
+### 4. 상태 확인
+
+```bash
+# 등록된 모든 서비스 조회
+p4gitsync status
+
+# 특정 서비스 상세 조회
+p4gitsync status --name p4gitsync-dev
+```
+
+출력 예시:
+
+```
+서비스: p4gitsync-dev
+  상태:        ● 실행중 (PID 6668)
+  Config:      /opt/p4gitsync/config.toml
+  Stream:      //stream/devmini (virtual → //stream/dev)
+  방향:        bidirectional
+  Git repo:    /data/project.git
+  Last CL:     334650
+  LFS:         활성화 (16 확장자)
+```
+
+### 다중 인스턴스
+
+여러 stream을 동시에 동기화하려면 각각 별도 서비스로 등록합니다:
+
+```bash
+p4gitsync setup --config config-dev.toml
+p4gitsync setup --config config-main.toml
+
+p4gitsync service install --config config-dev.toml --name p4gitsync-dev
+p4gitsync service install --config config-main.toml --name p4gitsync-main
+
+p4gitsync service start --name p4gitsync-dev
+p4gitsync service start --name p4gitsync-main
+```
+
+### 서비스 관리
+
+```bash
+p4gitsync service stop --name p4gitsync-dev       # 서비스 중지
+p4gitsync service uninstall --name p4gitsync-dev   # 서비스 제거
+```
+
+### Docker 배포
+
+Docker를 선호하면 Docker Compose로도 배포 가능합니다:
+
+```bash
+cd P4SyncGit/deploy
+# config.toml 수정
+docker compose up -d
+curl http://localhost:8080/api/health
+```
+
+### 포그라운드 실행
+
+서비스 등록 없이 직접 실행할 수도 있습니다:
+
+```bash
+p4gitsync --config config.toml run
 ```
 
 ## 설정
@@ -193,7 +252,12 @@ def git_to_p4(commit_info: dict) -> dict:
 
 | 명령 | 설명 |
 |------|------|
-| `p4gitsync run` | 동기화 루프 실행 (기본) |
+| `p4gitsync setup` | 대화형 config.toml 생성/수정 |
+| `p4gitsync run` | 동기화 루프 실행 (포그라운드) |
+| `p4gitsync service install` | OS 서비스로 등록 (Windows: NSSM, Linux: systemd) |
+| `p4gitsync service start/stop` | 서비스 시작/중지 |
+| `p4gitsync service uninstall` | 서비스 제거 |
+| `p4gitsync status` | 등록된 서비스 상태 조회 |
 | `p4gitsync import [--stream]` | 초기 히스토리 import |
 | `p4gitsync resync --from N --to M` | CL 범위 재동기화 |
 | `p4gitsync rebuild-state` | Git log에서 State DB 재구성 |
