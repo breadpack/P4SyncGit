@@ -135,8 +135,6 @@ class InitialImporter:
         skipped = 0
         last_written_cl = 0
         actual_processed = 0
-        consecutive_errors = 0
-        max_consecutive_errors = 5
         error_cls: list[int] = []
         self._grand_total = grand_total
         self._already_done = already_done
@@ -176,24 +174,16 @@ class InitialImporter:
                     self._write_cl_to_importer(cl_data, i, branch, fast_importer)
                     last_written_cl = cl
                     actual_processed = next_i
-                    consecutive_errors = 0  # 성공 시 연속 에러 카운트 초기화
                 except OSError as e:
-                    consecutive_errors += 1
                     error_cls.append(cl)
                     logger.error(
-                        "fast-import write 실패 (CL %d, 연속 %d/%d): %s",
-                        cl, consecutive_errors, max_consecutive_errors, e,
+                        "fast-import write 실패, import 중단 (CL %d): %s", cl, e,
                     )
-                    if consecutive_errors >= max_consecutive_errors:
-                        logger.error(
-                            "연속 %d건 에러 발생, import 중단. 에러 CL: %s",
-                            max_consecutive_errors, error_cls[-max_consecutive_errors:],
-                        )
-                        break
-                    # fast-import 재시작하여 다음 CL 시도
-                    fast_importer.finish()
-                    fast_importer = FastImporter(self._repo_path)
-                    fast_importer.start()
+                    logger.error(
+                        "재시작하면 마지막 체크포인트(CL %d)부터 이어서 진행됩니다.",
+                        last_written_cl,
+                    )
+                    break
                 del cl_data
 
                 # checkpoint — last_written_cl 기준으로만 state 기록
