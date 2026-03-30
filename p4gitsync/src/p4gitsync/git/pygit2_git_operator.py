@@ -154,13 +154,20 @@ class Pygit2GitOperator:
         # fetch 후 repo 다시 열기 (새 refs 반영)
         self._repo = pygit2.Repository(self._repo_path)
 
-    def get_log_after(self, branch: str, after_sha: str | None, remote: str = "origin") -> list[dict]:
+    def get_log_after(
+        self, branch: str, after_sha: str | None, remote: str = "origin", max_count: int = 1000,
+    ) -> list[dict]:
         if after_sha:
             range_spec = f"{after_sha}..{remote}/{branch}"
         else:
             range_spec = f"{remote}/{branch}"
+        cmd = [
+            "git", "log", range_spec, "--reverse",
+            f"--max-count={max_count}",
+            "--format=%H%n%an%n%ae%n%at%n%P%n%B%x00",
+        ]
         result = subprocess.run(
-            ["git", "log", range_spec, "--reverse", "--format=%H%n%an%n%ae%n%at%n%P%n%B%x00"],
+            cmd,
             cwd=self._repo_path,
             capture_output=True,
             text=True,
