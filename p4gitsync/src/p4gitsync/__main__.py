@@ -100,6 +100,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="stream당 merge 스캔 CL 수 제한 (0=전체, 예: 1000=최근 1000건만)",
     )
 
+    subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
+
     return parser
 
 
@@ -336,10 +338,16 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
+    command = args.command or "run"
+
+    # setup은 config 파일 없이도 실행 가능
+    if command == "setup":
+        from p4gitsync.cli.setup_wizard import run_setup
+        run_setup(args.config)
+        return
+
     config = load_config(args.config)
     setup_logging(config.logging.level, config.logging.format, config.logging.file)
-
-    command = args.command or "run"
 
     if command == "import":
         _run_import(config, args.stream, getattr(args, "streams", None))
