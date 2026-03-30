@@ -348,15 +348,55 @@ def _setup_state(existing: dict[str, Any] | None = None) -> dict[str, Any]:
 
 def _save_config(config: dict[str, Any], config_path: str) -> None:
     """config dict를 TOML 파일로 저장."""
-    import tomli_w
-
     path = Path(config_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    with open(path, "wb") as f:
-        tomli_w.dump(config, f)
+    toml_str = _dict_to_toml(config)
+    path.write_text(toml_str, encoding="utf-8")
 
     print(f"\n설정 파일 저장 완료: {path.resolve()}")
+
+
+def _dict_to_toml(data: dict[str, Any], prefix: str = "") -> str:
+    """dict를 TOML 문자열로 변환 (외부 의존성 없음)."""
+    lines: list[str] = []
+    tables: list[tuple[str, dict]] = []
+    array_tables: list[tuple[str, list]] = []
+
+    for key, value in data.items():
+        full_key = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            tables.append((full_key, value))
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            array_tables.append((full_key, value))
+        else:
+            lines.append(f"{key} = {_toml_value(value)}")
+
+    result = "\n".join(lines)
+    for table_key, table_dict in tables:
+        section = _dict_to_toml(table_dict, table_key)
+        result += f"\n\n[{table_key}]\n{section}"
+    for table_key, items in array_tables:
+        for item in items:
+            section = _dict_to_toml(item)
+            result += f"\n\n[[{table_key}]]\n{section}"
+    return result.strip()
+
+
+def _toml_value(value: Any) -> str:
+    """Python 값을 TOML 값 문자열로 변환."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return str(value)
+    if isinstance(value, str):
+        return f'"{value}"'
+    if isinstance(value, list):
+        items = ", ".join(_toml_value(v) for v in value)
+        return f"[{items}]"
+    return f'"{value}"'
 
 
 def _new_setup(config_path: str) -> None:
