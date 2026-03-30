@@ -102,6 +102,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
 
+    service_parser = subparsers.add_parser("service", help="서비스 관리")
+    service_sub = service_parser.add_subparsers(dest="service_command")
+
+    svc_install = service_sub.add_parser("install", help="서비스 등록")
+    svc_install.add_argument("--name", default="p4gitsync", help="서비스 이름")
+
+    svc_start = service_sub.add_parser("start", help="서비스 시작")
+    svc_start.add_argument("--name", default="p4gitsync", help="서비스 이름")
+
+    svc_stop = service_sub.add_parser("stop", help="서비스 중지")
+    svc_stop.add_argument("--name", default="p4gitsync", help="서비스 이름")
+
+    svc_uninstall = service_sub.add_parser("uninstall", help="서비스 제거")
+    svc_uninstall.add_argument("--name", default="p4gitsync", help="서비스 이름")
+
+    status_parser = subparsers.add_parser("status", help="동기화 상태 조회")
+    status_parser.add_argument("--name", help="특정 서비스만 조회")
+
     return parser
 
 
@@ -334,16 +352,54 @@ def _run_preview(
         p4_client.disconnect()
 
 
+def _run_service(args) -> None:
+    from pathlib import Path
+
+    from p4gitsync.cli.service_manager import create_service_manager
+
+    manager = create_service_manager()
+    subcmd = args.service_command
+    name = getattr(args, "name", "p4gitsync")
+
+    if subcmd == "install":
+        if getattr(sys, "frozen", False):
+            exe_path = sys.executable
+        else:
+            exe_path = f"{sys.executable} -m p4gitsync"
+        config_path = str(Path(args.config).resolve())
+        manager.install(name, exe_path, config_path)
+        print(f"서비스 '{name}' 등록 완료.")
+        print(f"시작: p4gitsync service start --name {name}")
+    elif subcmd == "start":
+        manager.start(name)
+        print(f"서비스 '{name}' 시작됨.")
+    elif subcmd == "stop":
+        manager.stop(name)
+        print(f"서비스 '{name}' 중지됨.")
+    elif subcmd == "uninstall":
+        manager.uninstall(name)
+        print(f"서비스 '{name}' 제거됨.")
+    else:
+        print("사용법: p4gitsync service {install|start|stop|uninstall}")
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
     command = args.command or "run"
 
-    # setup은 config 파일 없이도 실행 가능
+    # setup, service, status는 config 파일 없이도 실행 가능
     if command == "setup":
         from p4gitsync.cli.setup_wizard import run_setup
         run_setup(args.config)
+        return
+    if command == "service":
+        _run_service(args)
+        return
+    if command == "status":
+        from p4gitsync.cli.status_reporter import show_status
+        show_status(getattr(args, "name", None))
         return
 
     config = load_config(args.config)
