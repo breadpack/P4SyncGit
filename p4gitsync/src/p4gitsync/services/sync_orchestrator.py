@@ -607,6 +607,9 @@ class SyncOrchestrator:
         if self._git_change_detector is None or self._conflict_detector is None:
             return False
 
+        if not self._config.git.remote_url:
+            return False  # remote 없으면 외부 Git 변경 없음 → 충돌 불가
+
         # 이미 충돌 상태이면 해결 여부만 확인
         conflict = self._state_store.get_conflict(branch)
         if conflict:
