@@ -135,6 +135,9 @@ class InitialImporter:
         skipped = 0
         last_written_cl = 0
         actual_processed = 0
+        consecutive_errors = 0
+        max_consecutive_errors = 5
+        error_cls: list[int] = []
         self._grand_total = grand_total
         self._already_done = already_done
         self._rate_samples: deque[tuple[float, int]] = deque(maxlen=6)
@@ -142,7 +145,6 @@ class InitialImporter:
             ws["cls"] = ws["files"] = 0
             ws["elapsed"] = 0.0
 
-        last_seen_cl = 0
         try:
             for i in range(total):
                 # timeout 부여로 Ctrl+C(KeyboardInterrupt) 수신 가능
@@ -161,16 +163,12 @@ class InitialImporter:
                     break
 
                 cl = cl_data.cl
-                last_seen_cl = cl
                 next_i = i + 1
 
-                # 최적화 #3: 빈 CL 스킵
+                # 최적화 #3: 빈 CL 스킵 (state에 기록하지 않음 — last_written_cl 기준으로만 기록)
                 if cl_data.skipped:
                     skipped += 1
                     del cl_data
-                    # 빈 CL도 주기적으로 진행 상태 기록 (재시작 시 재처리 방지)
-                    if next_i % self._checkpoint_interval == 0:
-                        self._state.set_last_synced_cl(self._stream, last_seen_cl, "")
                     self._log_progress(next_i, total, skipped, import_start_time)
                     continue
 
@@ -178,24 +176,35 @@ class InitialImporter:
                     self._write_cl_to_importer(cl_data, i, branch, fast_importer)
                     last_written_cl = cl
                     actual_processed = next_i
+                    consecutive_errors = 0  # 성공 시 연속 에러 카운트 초기화
                 except OSError as e:
-                    logger.error("fast-import write 실패 (CL %d): %s", cl, e)
-                    # fast-import 재시작하여 계속 진행
+                    consecutive_errors += 1
+                    error_cls.append(cl)
+                    logger.error(
+                        "fast-import write 실패 (CL %d, 연속 %d/%d): %s",
+                        cl, consecutive_errors, max_consecutive_errors, e,
+                    )
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.error(
+                            "연속 %d건 에러 발생, import 중단. 에러 CL: %s",
+                            max_consecutive_errors, error_cls[-max_consecutive_errors:],
+                        )
+                        break
+                    # fast-import 재시작하여 다음 CL 시도
                     fast_importer.finish()
                     fast_importer = FastImporter(self._repo_path)
                     fast_importer.start()
-                    logger.info("fast-import 재시작 후 계속 진행")
                 del cl_data
 
-                # checkpoint
-                if next_i % self._checkpoint_interval == 0:
+                # checkpoint — last_written_cl 기준으로만 state 기록
+                if next_i % self._checkpoint_interval == 0 and last_written_cl > 0:
                     rc = fast_importer.finish()
                     if rc != 0:
                         logger.error("fast-import 체크포인트 실패 (returncode=%d), state 기록 스킵", rc)
                         break
                     head_sha = self._get_head_sha(branch)
-                    self._state.set_last_synced_cl(self._stream, cl, head_sha)
-                    self._state.record_commit(cl, head_sha, self._stream, branch)
+                    self._state.set_last_synced_cl(self._stream, last_written_cl, head_sha)
+                    self._state.record_commit(last_written_cl, head_sha, self._stream, branch)
                     eta = self._calc_eta(next_i, total)
                     # 워커별 통계 출력
                     for wid, ws in enumerate(self._worker_stats):
@@ -240,9 +249,12 @@ class InitialImporter:
             logger.error("fast-import 최종 finish 실패 (returncode=%d), state 기록 스킵", final_rc)
         elapsed = time.monotonic() - import_start_time
         logger.info(
-            "초기 import 완료: %d/%d CL 처리, %d 스킵, 소요 %s",
-            actual_processed, total, skipped, self._format_duration(elapsed),
+            "초기 import 완료: %d/%d CL 처리, %d 스킵, %d 에러, 소요 %s",
+            actual_processed, total, skipped, len(error_cls),
+            self._format_duration(elapsed),
         )
+        if error_cls:
+            logger.warning("에러 발생 CL 목록: %s", error_cls)
 
     # ── prefetch 파이프라인 ──────────────────────────────
 
