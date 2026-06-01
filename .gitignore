@@ -13,3 +13,9 @@ build/
 venv/
 .env
 p4gitsync/config.toml
+
+# 내부(실 depot) 데이터가 담기는 생성 산출물 — 공개 repo에 커밋 금지
+import-preview*
+preview-events.json
+branch-tree-preview.png
+commit-graph*.png
