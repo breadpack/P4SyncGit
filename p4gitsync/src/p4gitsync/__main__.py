@@ -100,6 +100,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="stream당 merge 스캔 CL 수 제한 (0=전체, 예: 1000=최근 1000건만)",
     )
 
+    preflight_parser = subparsers.add_parser(
+        "preflight", help="마이그레이션 사전 점검 (사이징·case충돌·비LFS대용량)",
+    )
+    preflight_parser.add_argument(
+        "--stream", help="P4 stream 경로 (미지정 시 설정 파일의 p4.stream 사용)",
+    )
+    preflight_parser.add_argument(
+        "--top-dirs", nargs="+",
+        help="용량을 분류해 볼 최상위 경로들 (예: //depot/main/CODE //depot/main/Art)",
+    )
+    preflight_parser.add_argument(
+        "--large-threshold-mb", type=float, default=5.0,
+        help="비-LFS 대용량 탐지 임계 (MiB, 기본: 5)",
+    )
+    preflight_parser.add_argument(
+        "--output", "-o", help="리포트 저장 경로 (미지정 시 콘솔 출력)",
+    )
+
     subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
 
     service_parser = subparsers.add_parser("service", help="서비스 관리")
@@ -297,7 +315,7 @@ def _run_preview(
 
         scan_merges = not no_merge_scan
         if scan_merges:
-            print(f"merge 스캔 중... (시간이 걸릴 수 있습니다)")
+            print("merge 스캔 중... (시간이 걸릴 수 있습니다)")
             if merge_scan_limit:
                 print(f"  stream당 최근 {merge_scan_limit} CL만 스캔")
 
@@ -333,7 +351,7 @@ def _run_preview(
         with open(graph_output, "w", encoding="utf-8") as f:
             f.write(graph_report)
 
-        print(f"\n미리보기 문서 생성 완료:")
+        print("\n미리보기 문서 생성 완료:")
         print(f"  마크다운:   {output}")
         print(f"  다이어그램: {html_output}")
         print(f"  커밋 그래프: {graph_output}")
@@ -350,6 +368,40 @@ def _run_preview(
         print(f"  Cherry-pick: {cps}개")
     finally:
         p4_client.disconnect()
+
+
+def _run_preflight(
+    config: AppConfig,
+    stream: str | None,
+    top_dirs: list[str] | None,
+    large_threshold_mb: float,
+    output: str | None,
+) -> None:
+    from p4gitsync.services.preflight import PreflightChecker
+
+    p4_stream = stream or config.p4.stream
+    threshold = int(large_threshold_mb * 1024 * 1024)
+
+    p4_client = config.p4.create_client()
+    p4_client.connect()
+    try:
+        checker = PreflightChecker(
+            p4_client,
+            lfs_config=config.lfs if config.lfs.enabled else None,
+        )
+        report = checker.run(p4_stream, top_dirs=top_dirs, large_threshold=threshold)
+    finally:
+        p4_client.disconnect()
+
+    text = report.format_report()
+    print(text)
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+        print(f"\n리포트 저장: {output}")
+
+    if report.has_blockers:
+        sys.exit(1)
 
 
 def _run_service(args) -> None:
@@ -421,6 +473,11 @@ def main() -> None:
         _run_preview(
             config, args.depot, args.output,
             args.no_merge_scan, args.merge_scan_limit,
+        )
+    elif command == "preflight":
+        _run_preflight(
+            config, args.stream, getattr(args, "top_dirs", None),
+            args.large_threshold_mb, args.output,
         )
     else:
         _run_sync(config)

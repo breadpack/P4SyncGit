@@ -253,6 +253,7 @@ def git_to_p4(commit_info: dict) -> dict:
 | 명령 | 설명 |
 |------|------|
 | `p4gitsync setup` | 대화형 config.toml 생성/수정 |
+| `p4gitsync preflight [--stream] [--top-dirs ...]` | 마이그레이션 사전 점검 — 용량(head/history)·전략 권고·case충돌·비LFS대용량 (blocker 발견 시 exit 1) |
 | `p4gitsync run` | 동기화 루프 실행 (포그라운드) |
 | `p4gitsync service install` | OS 서비스로 등록 (Windows: NSSM, Linux: systemd) |
 | `p4gitsync service start/stop` | 서비스 시작/중지 |

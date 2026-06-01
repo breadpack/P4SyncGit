@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from functools import wraps
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TypeVar, Callable, ParamSpec
 
 from P4 import P4, P4Exception
@@ -114,6 +114,40 @@ class P4Client:
             f"{stream}/...",
         )
         return sorted(int(r["change"]) for r in results)
+
+    @_auto_reconnect
+    def get_size_summary(self, path: str, all_revisions: bool = False) -> tuple[int, int]:
+        """경로의 용량 요약을 (파일/리비전 수, 바이트) 로 반환.
+
+        Args:
+            path: depot 경로 (예: "//depot/main/...#head" 또는 "//depot/main/...").
+            all_revisions: True면 `p4 sizes -a -s` (전체 리비전 누적),
+                False면 `p4 sizes -s` (해당 리비전 스냅샷).
+        """
+        args = ["-a", "-s", path] if all_revisions else ["-s", path]
+        results = self._p4.run_sizes(*args)
+        if not results:
+            return (0, 0)
+        d = results[0]
+        count = int(d.get("fileCount") or d.get("change") or 0)
+        size = int(d.get("fileSize") or 0)
+        return (count, size)
+
+    @_auto_reconnect
+    def iter_file_sizes(self, path: str) -> list[tuple[str, int]]:
+        """경로의 파일별 (depot_path, 바이트) 목록을 반환 (per-file `p4 sizes`).
+
+        case-collision 스캔 및 비-LFS 대용량 탐지의 입력으로 사용.
+        path는 보통 "{stream}/...#head" 형태.
+        """
+        results = self._p4.run_sizes(path)
+        out: list[tuple[str, int]] = []
+        for d in results:
+            depot_file = d.get("depotFile")
+            if depot_file is None:
+                continue
+            out.append((depot_file, int(d.get("fileSize") or 0)))
+        return out
 
     @staticmethod
     def _parse_describe_result(desc: dict) -> P4ChangeInfo:
