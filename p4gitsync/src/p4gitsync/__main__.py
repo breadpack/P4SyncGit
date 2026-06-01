@@ -131,6 +131,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="비-LFS 대용량 차단 임계 (MiB, 기본: 5)",
     )
 
+    pg_parser = subparsers.add_parser(
+        "provision-gitlab",
+        help="GitLab API로 거버넌스 설정 적용 (push rule/protected branch/merge train)",
+    )
+    pg_parser.add_argument("--gitlab-url", help="GitLab base URL (또는 env P4GITSYNC_GITLAB_URL)")
+    pg_parser.add_argument("--project", help="프로젝트 경로 또는 ID (또는 env P4GITSYNC_GITLAB_PROJECT)")
+    pg_parser.add_argument("--token", help="GitLab 토큰 (미지정 시 env GITLAB_TOKEN / P4GITSYNC_GITLAB_TOKEN)")
+    pg_parser.add_argument("--max-file-size-mb", type=float, default=5.0)
+    pg_parser.add_argument("--protect", nargs="+", default=["main"], help="보호할 브랜치 (기본: main)")
+    pg_parser.add_argument("--merge-train", action="store_true", help="merge train 활성화")
+    pg_parser.add_argument("--no-lfs", action="store_true", help="LFS 비활성(기본: 활성)")
+    pg_parser.add_argument("--dry-run", action="store_true", help="실제 호출 없이 적용 계획만 출력")
+
     subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
 
     service_parser = subparsers.add_parser("service", help="서비스 관리")
@@ -417,6 +430,51 @@ def _run_preflight(
         sys.exit(1)
 
 
+def _run_provision_gitlab(args) -> None:
+    import os
+
+    from p4gitsync.services.gitlab_provisioner import (
+        GitLabClient,
+        GitLabProvisioner,
+        ProvisionSpec,
+    )
+
+    url = args.gitlab_url or os.environ.get("P4GITSYNC_GITLAB_URL")
+    project = args.project or os.environ.get("P4GITSYNC_GITLAB_PROJECT")
+    token = (
+        args.token
+        or os.environ.get("GITLAB_TOKEN")
+        or os.environ.get("P4GITSYNC_GITLAB_TOKEN")
+    )
+
+    if not url or not project:
+        print("--gitlab-url 과 --project (또는 P4GITSYNC_GITLAB_URL/PROJECT) 가 필요합니다.", file=sys.stderr)
+        sys.exit(2)
+    if not token and not args.dry_run:
+        print("GitLab 토큰이 필요합니다 (env GITLAB_TOKEN 또는 --token). --dry-run 은 토큰 없이 가능.", file=sys.stderr)
+        sys.exit(2)
+
+    spec = ProvisionSpec(
+        max_file_size_mb=args.max_file_size_mb,
+        lfs_enabled=not args.no_lfs,
+        merge_trains=args.merge_train,
+        protected_branches=args.protect,
+    )
+    client = GitLabClient(url, token or "")
+    provisioner = GitLabProvisioner(client, project)
+    results = provisioner.apply(spec, dry_run=args.dry_run)
+
+    print(f"GitLab 프로비저닝: {project} ({'DRY-RUN' if args.dry_run else url})")
+    failed = 0
+    for r in results:
+        mark = "[OK]" if r.ok else "[FAIL]"
+        if not r.ok:
+            failed += 1
+        print(f"  {mark} [{r.action}] {r.detail}")
+    if failed and not args.dry_run:
+        sys.exit(1)
+
+
 def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> None:
     import dataclasses
 
@@ -501,6 +559,9 @@ def main() -> None:
         return
     if command == "service":
         _run_service(args)
+        return
+    if command == "provision-gitlab":
+        _run_provision_gitlab(args)
         return
     if command == "status":
         from p4gitsync.cli.status_reporter import show_status

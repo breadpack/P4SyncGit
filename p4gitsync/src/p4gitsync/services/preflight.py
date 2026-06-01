@@ -163,27 +163,27 @@ class PreflightReport:
         lines.append("")
         lines.append("[3] Blocker — case-collision (P4 insensitive → git sensitive)")
         if self.case_collisions:
-            lines.append(f"  🔴 {len(self.case_collisions)}개 충돌 그룹 발견 (마이그레이션 전 정리 필요):")
+            lines.append(f"  [BLOCKER] {len(self.case_collisions)}개 충돌 그룹 발견 (마이그레이션 전 정리 필요):")
             for group in self.case_collisions[:20]:
                 lines.append(f"    - {'  |  '.join(group)}")
             if len(self.case_collisions) > 20:
                 lines.append(f"    ... 외 {len(self.case_collisions) - 20}개")
         else:
-            lines.append("  ✅ 충돌 없음")
+            lines.append("  [OK] 충돌 없음")
         lines.append("")
         lines.append(f"[4] Blocker — 비-LFS 대용량 (> {_fmt(self.large_threshold)})")
         if self.non_lfs_large:
-            lines.append(f"  🔴 {len(self.non_lfs_large)}개 — LFS 추적에 추가하거나 .gitattributes 보완 필요:")
+            lines.append(f"  [BLOCKER] {len(self.non_lfs_large)}개 — LFS 추적에 추가하거나 .gitattributes 보완 필요:")
             for path, size in self.non_lfs_large[:20]:
                 lines.append(f"    - {_fmt(size):>10}  {path}")
             if len(self.non_lfs_large) > 20:
                 lines.append(f"    ... 외 {len(self.non_lfs_large) - 20}개")
         else:
-            lines.append("  ✅ 없음")
+            lines.append("  [OK] 없음")
         lines.append("")
         lines.append("=" * 60)
-        lines.append("판정: " + ("🔴 BLOCKER 있음 — 위 항목 해결 후 진행" if self.has_blockers
-                                else "✅ 통과 — 마이그레이션 진행 가능"))
+        lines.append("판정: " + ("[BLOCKER] BLOCKER 있음 — 위 항목 해결 후 진행" if self.has_blockers
+                                else "[OK] 통과 — 마이그레이션 진행 가능"))
         lines.append("=" * 60)
         return "\n".join(lines)
 
