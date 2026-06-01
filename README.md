@@ -256,6 +256,7 @@ def git_to_p4(commit_info: dict) -> dict:
 | `p4gitsync preflight [--stream] [--top-dirs ...]` | 마이그레이션 사전 점검 — 용량(head/history)·전략 권고·case충돌·비LFS대용량 (blocker 발견 시 exit 1) |
 | `p4gitsync provision [-o dir]` | 팀 사용 권장 설정 생성 — 역할별 bootstrap-clone(sh/ps1)·pre-receive 훅·gitconfig·.gitattributes·GitLab 체크리스트 |
 | `p4gitsync provision-gitlab --gitlab-url U --project P [--dry-run]` | GitLab API로 거버넌스 직접 적용 — push rule(max file size)·protected branch(force-push 금지)·LFS·merge train. 토큰은 env `GITLAB_TOKEN` |
+| `p4gitsync lfs-push [--batch-size N] [--continue-on-error] [--reset-progress]` | LFS 객체를 배치 단위로 업로드(재개 가능) — TiB급 마이그레이션용. 완료 OID를 진행 파일에 기록해 중단 후 이어서 진행 |
 | `p4gitsync run` | 동기화 루프 실행 (포그라운드) |
 | `p4gitsync service install` | OS 서비스로 등록 (Windows: NSSM, Linux: systemd) |
 | `p4gitsync service start/stop` | 서비스 시작/중지 |

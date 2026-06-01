@@ -118,6 +118,21 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", "-o", help="리포트 저장 경로 (미지정 시 콘솔 출력)",
     )
 
+    lfs_push_parser = subparsers.add_parser(
+        "lfs-push",
+        help="LFS 객체를 배치로 업로드 (재개 가능) — TiB급 마이그레이션용",
+    )
+    lfs_push_parser.add_argument("--remote", default="origin", help="대상 remote (기본: origin)")
+    lfs_push_parser.add_argument("--batch-size", type=int, default=200, help="배치당 OID 수 (기본: 200)")
+    lfs_push_parser.add_argument(
+        "--continue-on-error", action="store_true",
+        help="배치 실패 시 중단하지 않고 계속 (실패 OID는 다음 실행에서 재시도)",
+    )
+    lfs_push_parser.add_argument(
+        "--reset-progress", action="store_true", help="진행 상태를 초기화하고 처음부터",
+    )
+    lfs_push_parser.add_argument("--progress-file", help="진행 상태 파일 경로")
+
     provision_parser = subparsers.add_parser(
         "provision",
         help="팀 사용을 위한 권장 설정 파일 생성 (bootstrap/훅/gitconfig/체크리스트)",
@@ -430,6 +445,30 @@ def _run_preflight(
         sys.exit(1)
 
 
+def _run_lfs_push(config: AppConfig, args) -> None:
+    import os
+
+    from p4gitsync.services.lfs_pusher import LfsPusher, LfsPushProgress
+
+    repo = config.git.repo_path
+    progress_path = args.progress_file or os.path.join(repo, ".lfs-push-progress.json")
+    progress = LfsPushProgress(progress_path)
+    pusher = LfsPusher(repo, remote=args.remote, progress=progress)
+
+    if args.reset_progress:
+        pusher.reset_progress()
+        print("진행 상태 초기화됨")
+
+    summary = pusher.run(
+        batch_size=args.batch_size,
+        continue_on_error=args.continue_on_error,
+    )
+    print(f"LFS push 결과: {summary}")
+    if not summary.ok:
+        print(f"  실패 OID {len(summary.failed_oids)}건 — 재실행하면 완료분은 건너뛰고 이어서 진행됩니다.")
+        sys.exit(1)
+
+
 def _run_provision_gitlab(args) -> None:
     import os
 
@@ -595,6 +634,8 @@ def main() -> None:
         )
     elif command == "provision":
         _run_provision(config, args.output, args.max_file_size_mb)
+    elif command == "lfs-push":
+        _run_lfs_push(config, args)
     else:
         _run_sync(config)
 
