@@ -1,10 +1,10 @@
 import logging
 import os
 import subprocess
-import tempfile
 from typing import Sequence
 
 from p4gitsync.git.commit_metadata import CommitMetadata
+from p4gitsync.git.file_mode import unpack_change
 
 logger = logging.getLogger("p4gitsync.git.cli")
 
@@ -249,7 +249,8 @@ class GitCliOperator:
         for path in delete_set:
             existing.pop(path, None)
 
-        for path, content in file_changes:
+        for item in file_changes:
+            path, content, mode = unpack_change(item)
             result = subprocess.run(
                 ["git", "hash-object", "-w", "--stdin"],
                 cwd=self._repo_path,
@@ -259,7 +260,7 @@ class GitCliOperator:
             if result.returncode != 0:
                 raise RuntimeError(f"git hash-object 실패: {result.stderr.decode()}")
             blob_sha = result.stdout.decode().strip()
-            existing[path] = ("100644", blob_sha)
+            existing[path] = (f"{mode:o}", blob_sha)
 
         tree_input = ""
         for path, (mode, sha) in sorted(existing.items()):

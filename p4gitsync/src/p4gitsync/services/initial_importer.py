@@ -8,8 +8,10 @@ from dataclasses import dataclass, field
 
 from p4gitsync.config.lfs_config import LfsConfig
 from p4gitsync.config.sync_config import InitialImportConfig, P4Config
+from p4gitsync.errors import ContentExtractionError
 from p4gitsync.git.commit_metadata import CommitMetadata
 from p4gitsync.git.fast_importer import FastImporter
+from p4gitsync.git.file_mode import git_mode_from_p4_type
 from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_client import P4Client
@@ -32,7 +34,8 @@ class _CLData:
     """CL 하나의 추출 결과."""
     cl: int
     info: P4ChangeInfo
-    normal_results: list[tuple[str, bytes]] = field(default_factory=list)
+    # (git_path, content, git_mode)
+    normal_results: list[tuple[str, bytes, int]] = field(default_factory=list)
     lfs_results: list[tuple[str, bytes]] = field(default_factory=list)  # (git_path, pointer_bytes)
     deletes: list[str] = field(default_factory=list)
     file_count: int = 0
@@ -195,7 +198,6 @@ class InitialImporter:
                     head_sha = self._get_head_sha(branch)
                     self._state.set_last_synced_cl(self._stream, last_written_cl, head_sha)
                     self._state.record_commit(last_written_cl, head_sha, self._stream, branch)
-                    eta = self._calc_eta(next_i, total)
                     # 워커별 통계 출력
                     for wid, ws in enumerate(self._worker_stats):
                         if ws["cls"] > 0:
@@ -405,20 +407,34 @@ class InitialImporter:
 
         # normal과 LFS를 동시 추출 (각각 다른 P4 연결 사용)
         if total_lfs > 0 and total_normal > 0 and lfs_p4:
+            # LFS 스레드의 예외를 포착해 join 후 재전파(silent loss 방지).
+            lfs_error: list[BaseException] = []
+
+            def _lfs_target() -> None:
+                try:
+                    self._extract_lfs_files(lfs_files, lfs_p4, data, cl)
+                except BaseException as e:  # noqa: BLE001 - 메인 스레드로 전달
+                    lfs_error.append(e)
+
             lfs_thread = threading.Thread(
-                target=self._extract_lfs_files,
-                args=(lfs_files, lfs_p4, data, cl),
+                target=_lfs_target,
                 name=f"lfs-{cl}",
                 daemon=True,
             )
             lfs_thread.start()
 
-            if total_normal >= _LARGE_CL_THRESHOLD:
-                data.normal_results = self._parallel_print(normal_files, p4, cl, lfs_p4)
-            else:
-                self._sequential_print(normal_files, p4, data, cl)
+            # lfs_p4는 LFS 스레드가 점유 중이므로 normal 병렬 print에 넘기지 않는다
+            # (동일 P4 연결 동시 사용 방지).
+            try:
+                if total_normal >= _LARGE_CL_THRESHOLD:
+                    data.normal_results = self._parallel_print(normal_files, p4, cl)
+                else:
+                    self._sequential_print(normal_files, p4, data, cl)
+            finally:
+                lfs_thread.join()
 
-            lfs_thread.join()
+            if lfs_error:
+                raise lfs_error[0]
         else:
             if total_normal >= _LARGE_CL_THRESHOLD:
                 data.normal_results = self._parallel_print(normal_files, p4, cl, lfs_p4)
@@ -440,19 +456,25 @@ class InitialImporter:
         data: _CLData,
         cl: int,
     ) -> None:
-        """LFS 파일을 batch print → pointer 변환."""
-        for chunk_start in range(0, len(lfs_files), _BATCH_PRINT_SIZE):
-            chunk = lfs_files[chunk_start:chunk_start + _BATCH_PRINT_SIZE]
-            file_specs = [f"{fa.depot_path}#{fa.revision}" for fa, _ in chunk]
-            batch_results = p4.print_files_batch(file_specs)
+        """LFS 파일을 디스크로 직접 print(p4 print -o) → 청크 단위로 LFS store에 저장.
 
-            for fa, git_path in chunk:
-                content = batch_results.get(fa.depot_path)
-                if content is not None:
-                    pointer = self._lfs_store.store_from_stream([content])
-                    data.lfs_results.append((git_path, pointer.pointer_bytes))
-                    del content
-            del batch_results
+        대형 에셋을 메모리에 통째로 올리지 않도록 print_file_to_disk +
+        store_from_file(4MB 청크) 경로를 사용한다. 추출 실패 시
+        ContentExtractionError를 던져 CL을 실패시킨다(무결성 보장).
+        """
+        missing: list[str] = []
+        for fa, git_path in lfs_files:
+            try:
+                tmp_path = p4.print_file_to_disk(
+                    fa.depot_path, fa.revision, self._lfs_store.tmp_dir,
+                )
+            except Exception:
+                missing.append(f"{fa.depot_path}#{fa.revision}")
+                continue
+            pointer = self._lfs_store.store_from_file(tmp_path)
+            data.lfs_results.append((git_path, pointer.pointer_bytes))
+        if missing:
+            raise ContentExtractionError(cl, missing)
 
     def _sequential_print(
         self,
@@ -463,6 +485,7 @@ class InitialImporter:
     ) -> None:
         """단일 P4 연결로 순차 batch print."""
         total = len(normal_files)
+        missing: list[str] = []
         for chunk_start in range(0, total, _BATCH_PRINT_SIZE):
             chunk = normal_files[chunk_start:chunk_start + _BATCH_PRINT_SIZE]
             file_specs = [f"{fa.depot_path}#{fa.revision}" for fa, _ in chunk]
@@ -471,8 +494,14 @@ class InitialImporter:
             for fa, git_path in chunk:
                 content = batch_results.get(fa.depot_path)
                 if content is not None:
-                    data.normal_results.append((git_path, content))
+                    data.normal_results.append(
+                        (git_path, content, git_mode_from_p4_type(fa.file_type))
+                    )
+                else:
+                    missing.append(f"{fa.depot_path}#{fa.revision}")
             del batch_results
+        if missing:
+            raise ContentExtractionError(cl, missing)
 
     def _parallel_print(
         self,
@@ -500,7 +529,8 @@ class InitialImporter:
 
         # 각 연결에 청크를 라운드로빈 배정하여 병렬 실행
         results_lock = threading.Lock()
-        all_results: list[tuple[str, bytes]] = []
+        all_results: list[tuple[str, bytes, int]] = []
+        all_missing: list[str] = []
         done_count = [0]
 
         def print_worker(p4: P4Client, my_chunks: list[list[tuple[P4FileAction, str]]]) -> None:
@@ -508,13 +538,19 @@ class InitialImporter:
                 file_specs = [f"{fa.depot_path}#{fa.revision}" for fa, _ in chunk]
                 batch_results = p4.print_files_batch(file_specs)
                 partial = []
+                partial_missing = []
                 for fa, git_path in chunk:
                     content = batch_results.get(fa.depot_path)
                     if content is not None:
-                        partial.append((git_path, content))
+                        partial.append(
+                            (git_path, content, git_mode_from_p4_type(fa.file_type))
+                        )
+                    else:
+                        partial_missing.append(f"{fa.depot_path}#{fa.revision}")
                 del batch_results
                 with results_lock:
                     all_results.extend(partial)
+                    all_missing.extend(partial_missing)
                     done_count[0] += len(chunk)
                     if done_count[0] % 1000 < _BATCH_PRINT_SIZE:
                         logger.info(
@@ -543,6 +579,9 @@ class InitialImporter:
         for t in threads:
             t.join()
 
+        if all_missing:
+            raise ContentExtractionError(cl, all_missing)
+
         return all_results
 
     # ── fast-import write ────────────────────────────
@@ -569,8 +608,8 @@ class InitialImporter:
 
         for git_path in cl_data.deletes:
             fast_importer.write_delete(git_path)
-        for git_path, content in cl_data.normal_results:
-            fast_importer.write_file(git_path, content)
+        for git_path, content, mode in cl_data.normal_results:
+            fast_importer.write_file(git_path, content, mode)
         for git_path, pointer_bytes in cl_data.lfs_results:
             fast_importer.write_file(git_path, pointer_bytes)
 

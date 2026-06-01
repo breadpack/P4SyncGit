@@ -3,7 +3,9 @@ from __future__ import annotations
 import logging
 
 from p4gitsync.config.lfs_config import LfsConfig
+from p4gitsync.errors import ContentExtractionError
 from p4gitsync.git.commit_metadata import CommitMetadata, IntegrationCommitInfo
+from p4gitsync.git.file_mode import GIT_MODE_FILE, git_mode_from_p4_type
 from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.git.git_operator import GitOperator
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer, MergeInfo
@@ -142,7 +144,7 @@ class CommitBuilder:
         branch: str,
         parent_sha: str | None,
         metadata: CommitMetadata,
-        file_changes: list[tuple[str, bytes]],
+        file_changes: list[tuple[str, bytes, int]],
         deletes: list[str],
     ) -> str:
         """merge commit 생성 시도. source SHA가 없으면 일반 commit으로 fallback."""
@@ -175,10 +177,16 @@ class CommitBuilder:
 
     def _extract_file_changes(
         self, info: P4ChangeInfo,
-    ) -> tuple[list[tuple[str, bytes]], list[str]]:
-        """changelist의 파일 변경 사항을 추출. 파일 수에 따라 batch/개별 모드 전환."""
-        file_changes: list[tuple[str, bytes]] = []
+    ) -> tuple[list[tuple[str, bytes, int]], list[str]]:
+        """changelist의 파일 변경 사항을 추출. 파일 수에 따라 batch/개별 모드 전환.
+
+        파일 항목은 (git_path, content, git_mode) 3-튜플. add/edit 파일의 내용
+        추출이 실패하면 조용히 건너뛰지 않고 ContentExtractionError를 던져 CL
+        전체를 실패시킨다(무결성 보장).
+        """
+        file_changes: list[tuple[str, bytes, int]] = []
         deletes: list[str] = []
+        missing: list[str] = []
 
         # 추가/편집 파일과 삭제 파일 분류
         add_edit_files: list[tuple[P4FileAction, str]] = []
@@ -212,40 +220,49 @@ class CommitBuilder:
             for fa, git_path in non_lfs_files:
                 content = batch_results.get(fa.depot_path)
                 if content is not None:
-                    file_changes.append((git_path, content))
-                else:
-                    logger.warning(
-                        "파일 내용 추출 실패, 건너뜀: %s#%d", fa.depot_path, fa.revision
+                    file_changes.append(
+                        (git_path, content, git_mode_from_p4_type(fa.file_type))
                     )
+                else:
+                    missing.append(f"{fa.depot_path}#{fa.revision}")
         else:
             for fa, git_path in non_lfs_files:
                 content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
                 if content is not None:
-                    file_changes.append((git_path, content))
-                else:
-                    logger.warning(
-                        "파일 내용 추출 실패, 건너뜀: %s#%d", fa.depot_path, fa.revision
+                    file_changes.append(
+                        (git_path, content, git_mode_from_p4_type(fa.file_type))
                     )
+                else:
+                    missing.append(f"{fa.depot_path}#{fa.revision}")
 
-        # LFS 파일: bytes로 추출 후 LFS store에 저장
+        # LFS 파일: 디스크 스트리밍 추출(메모리 비적재) 후 LFS store에 저장.
+        # 포인터 파일은 텍스트이므로 일반 모드(100644).
         for fa, git_path in lfs_files:
-            content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
-            if content is not None:
-                pointer = self._lfs_store.store_from_stream([content])
-                file_changes.append((git_path, pointer.pointer_bytes))
+            try:
+                tmp_path = self._p4.print_file_to_disk(
+                    fa.depot_path, fa.revision, self._lfs_store.tmp_dir,
+                )
+            except Exception:
+                missing.append(f"{fa.depot_path}#{fa.revision}")
+                continue
+            pointer = self._lfs_store.store_from_file(tmp_path)
+            file_changes.append((git_path, pointer.pointer_bytes, GIT_MODE_FILE))
+
+        if missing:
+            raise ContentExtractionError(info.changelist, missing)
 
         # LFS 설정 파일 (.gitattributes, .lfsconfig) 동기화
         if self._lfs and self._lfs.enabled:
             expected_attrs = self._lfs.generate_gitattributes().encode("utf-8")
             current_attrs = self._get_head_file_content(".gitattributes")
             if current_attrs != expected_attrs:
-                file_changes.insert(0, (".gitattributes", expected_attrs))
+                file_changes.insert(0, (".gitattributes", expected_attrs, GIT_MODE_FILE))
             lfsconfig = self._lfs.generate_lfsconfig()
             if lfsconfig is not None:
                 expected_lfsconfig = lfsconfig.encode("utf-8")
                 current_lfsconfig = self._get_head_file_content(".lfsconfig")
                 if current_lfsconfig != expected_lfsconfig:
-                    file_changes.append((".lfsconfig", expected_lfsconfig))
+                    file_changes.append((".lfsconfig", expected_lfsconfig, GIT_MODE_FILE))
 
         return file_changes, deletes
 

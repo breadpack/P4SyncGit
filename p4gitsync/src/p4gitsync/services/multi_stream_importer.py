@@ -6,8 +6,10 @@ from dataclasses import dataclass, field
 
 from p4gitsync.config.lfs_config import LfsConfig
 from p4gitsync.config.sync_config import InitialImportConfig
+from p4gitsync.errors import ContentExtractionError
 from p4gitsync.git.commit_metadata import CommitMetadata, IntegrationCommitInfo
 from p4gitsync.git.fast_importer import FastImporter
+from p4gitsync.git.file_mode import GIT_MODE_FILE, git_mode_from_p4_type
 from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
@@ -326,10 +328,16 @@ class MultiStreamImporter:
         info: P4ChangeInfo,
         stream: str,
         prefix_len: int,
-    ) -> tuple[list[tuple[str, bytes]], list[str]]:
-        """changelist에서 파일 변경사항을 추출한다."""
-        files: list[tuple[str, bytes]] = []
+    ) -> tuple[list[tuple[str, bytes, int]], list[str]]:
+        """changelist에서 파일 변경사항을 추출한다.
+
+        파일 항목은 (git_path, content, git_mode) 3-튜플. LFS 대상은 디스크
+        스트리밍(print_file_to_disk + store_from_file)으로 메모리 비적재 처리하고,
+        추출 실패 시 ContentExtractionError로 CL을 실패시킨다.
+        """
+        files: list[tuple[str, bytes, int]] = []
         deletes: list[str] = []
+        missing: list[str] = []
 
         for fa in info.files:
             git_path = depot_to_git_path(fa.depot_path, stream, prefix_len)
@@ -341,20 +349,35 @@ class MultiStreamImporter:
             elif fa.action in ADD_EDIT_ACTIONS:
                 if self._lfs and self._lfs.enabled and self._lfs.is_lfs_target(git_path):
                     if self._lfs_store:
-                        content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
-                        if content is not None:
-                            pointer = self._lfs_store.store_from_stream([content])
-                            files.append((git_path, pointer.pointer_bytes))
+                        try:
+                            tmp_path = self._p4.print_file_to_disk(
+                                fa.depot_path, fa.revision, self._lfs_store.tmp_dir,
+                            )
+                        except Exception:
+                            missing.append(f"{fa.depot_path}#{fa.revision}")
+                            continue
+                        pointer = self._lfs_store.store_from_file(tmp_path)
+                        # 포인터 파일은 텍스트이므로 일반 모드
+                        files.append((git_path, pointer.pointer_bytes, GIT_MODE_FILE))
                     else:
                         # fallback for backward compat (no store provided)
                         content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
                         if content is not None:
                             content = LfsConfig.create_lfs_pointer(content)
-                            files.append((git_path, content))
+                            files.append((git_path, content, GIT_MODE_FILE))
+                        else:
+                            missing.append(f"{fa.depot_path}#{fa.revision}")
                 else:
                     content = self._p4.print_file_to_bytes(fa.depot_path, fa.revision)
                     if content is not None:
-                        files.append((git_path, content))
+                        files.append(
+                            (git_path, content, git_mode_from_p4_type(fa.file_type))
+                        )
+                    else:
+                        missing.append(f"{fa.depot_path}#{fa.revision}")
+
+        if missing:
+            raise ContentExtractionError(info.changelist, missing)
 
         return files, deletes
 

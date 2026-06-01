@@ -114,6 +114,40 @@ class TestFastImporter:
         assert mark2 == 2
         assert fi.current_mark == 2
 
+    def test_file_modes_preserved(self, repo_dir):
+        """일반/실행/심링크 모드가 실제 git tree에 보존되는지 검증."""
+        from p4gitsync.git.file_mode import (
+            GIT_MODE_EXEC,
+            GIT_MODE_FILE,
+            GIT_MODE_SYMLINK,
+        )
+
+        fi = FastImporter(repo_dir)
+        fi.start()
+        fi.add_commit(
+            "main",
+            _make_metadata(1),
+            [
+                ("normal.txt", b"plain", GIT_MODE_FILE),
+                ("run.sh", b"#!/bin/sh\necho hi\n", GIT_MODE_EXEC),
+                ("link", b"normal.txt", GIT_MODE_SYMLINK),
+            ],
+        )
+        fi.finish()
+
+        result = subprocess.run(
+            ["git", "ls-tree", "refs/heads/main"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+        modes = {}
+        for line in result.stdout.strip().splitlines():
+            meta, path = line.split("\t", 1)
+            mode = meta.split()[0]
+            modes[path] = mode
+        assert modes["normal.txt"] == "100644"
+        assert modes["run.sh"] == "100755"
+        assert modes["link"] == "120000"
+
     def test_unicode_content(self, repo_dir):
         fi = FastImporter(repo_dir)
         fi.start()

@@ -2,6 +2,7 @@ import logging
 import subprocess
 
 from p4gitsync.git.commit_metadata import CommitMetadata
+from p4gitsync.git.file_mode import GIT_MODE_FILE, unpack_change
 
 logger = logging.getLogger("p4gitsync.git.fast_import")
 
@@ -45,10 +46,9 @@ class FastImporter:
         self._write("\n".join(lines) + "\n")
         self._write_bytes(msg_bytes + b"\n")
 
-        for path, content in files:
-            self._write(f"M 100644 inline {path}\n")
-            self._write(f"data {len(content)}\n")
-            self._write_bytes(content + b"\n")
+        for item in files:
+            path, content, mode = unpack_change(item)
+            self.write_file(path, content, mode)
 
         for path in (deletes or []):
             self._write(f"D {path}\n")
@@ -85,10 +85,9 @@ class FastImporter:
         elif merge_from_ref:
             self._write(f"merge {merge_from_ref}\n")
 
-        for path, content in files:
-            self._write(f"M 100644 inline {path}\n")
-            self._write(f"data {len(content)}\n")
-            self._write_bytes(content + b"\n")
+        for item in files:
+            path, content, mode = unpack_change(item)
+            self.write_file(path, content, mode)
 
         for path in (deletes or []):
             self._write(f"D {path}\n")
@@ -121,9 +120,14 @@ class FastImporter:
         self._write_bytes(msg_bytes + b"\n")
         return self._mark
 
-    def write_file(self, path: str, content: bytes) -> None:
-        """현재 commit에 파일 추가. begin_commit() 이후에 호출."""
-        self._write(f"M 100644 inline {path}\n")
+    def write_file(
+        self, path: str, content: bytes, mode: int = GIT_MODE_FILE,
+    ) -> None:
+        """현재 commit에 파일 추가. begin_commit() 이후에 호출.
+
+        mode는 Git 파일 모드(0o100644/0o100755/0o120000). 생략 시 일반 파일.
+        """
+        self._write(f"M {mode:o} inline {path}\n")
         self._write(f"data {len(content)}\n")
         self._write_bytes(content + b"\n")
 

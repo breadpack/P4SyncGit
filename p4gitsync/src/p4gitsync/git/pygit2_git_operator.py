@@ -2,13 +2,13 @@ import logging
 import os
 import subprocess
 import time
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Sequence
 
 import pygit2
 
 from p4gitsync.git.commit_metadata import CommitMetadata
+from p4gitsync.git.file_mode import unpack_change
 
 logger = logging.getLogger("p4gitsync.git.pygit2")
 
@@ -19,25 +19,26 @@ _LOOSE_OBJECT_THRESHOLD = 10000
 @dataclass
 class _TreeNode:
     """prefix별 사전 분류된 tree 변경 정보."""
-    blobs: dict[str, pygit2.Oid] = field(default_factory=dict)
+    # name -> (blob oid, git filemode)
+    blobs: dict[str, tuple[pygit2.Oid, int]] = field(default_factory=dict)
     delete_names: set[str] = field(default_factory=set)
     children: dict[str, "_TreeNode"] = field(default_factory=dict)
 
     @staticmethod
     def build(
-        path_blobs: dict[str, pygit2.Oid],
+        path_blobs: dict[str, tuple[pygit2.Oid, int]],
         delete_set: set[str],
     ) -> "_TreeNode":
         """전체 경로 목록을 한 번 순회하여 트리 구조로 분류. O(N)."""
         root = _TreeNode()
-        for path, blob_oid in path_blobs.items():
+        for path, blob_entry in path_blobs.items():
             parts = path.split("/")
             node = root
             for part in parts[:-1]:
                 if part not in node.children:
                     node.children[part] = _TreeNode()
                 node = node.children[part]
-            node.blobs[parts[-1]] = blob_oid
+            node.blobs[parts[-1]] = blob_entry
 
         for path in delete_set:
             parts = path.split("/")
@@ -364,10 +365,11 @@ class Pygit2GitOperator:
         except Exception:
             pass
 
-        path_blobs: dict[str, pygit2.Oid] = {}
-        for path, content in file_changes:
+        path_blobs: dict[str, tuple[pygit2.Oid, int]] = {}
+        for item in file_changes:
+            path, content, mode = unpack_change(item)
             blob_oid = self._repo.create_blob(content)
-            path_blobs[path] = blob_oid
+            path_blobs[path] = (blob_oid, mode)
 
         delete_set = set(deletes) if deletes else set()
 
@@ -395,7 +397,8 @@ class Pygit2GitOperator:
                     if name in node.delete_names:
                         continue
                     if name in node.blobs:
-                        tb.insert(name, node.blobs[name], pygit2.GIT_FILEMODE_BLOB)
+                        blob_oid, mode = node.blobs[name]
+                        tb.insert(name, blob_oid, mode)
                         processed_names.add(name)
                     else:
                         tb.insert(name, entry.id, entry.filemode)
@@ -413,9 +416,9 @@ class Pygit2GitOperator:
                         tb.insert(name, entry.id, entry.filemode)
 
         # 새 blob 추가
-        for name, blob_oid in node.blobs.items():
+        for name, (blob_oid, mode) in node.blobs.items():
             if name not in processed_names:
-                tb.insert(name, blob_oid, pygit2.GIT_FILEMODE_BLOB)
+                tb.insert(name, blob_oid, mode)
 
         # 새 디렉토리 추가
         for dir_name, child_node in node.children.items():
