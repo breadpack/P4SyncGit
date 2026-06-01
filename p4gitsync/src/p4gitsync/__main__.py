@@ -118,6 +118,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output", "-o", help="리포트 저장 경로 (미지정 시 콘솔 출력)",
     )
 
+    provision_parser = subparsers.add_parser(
+        "provision",
+        help="팀 사용을 위한 권장 설정 파일 생성 (bootstrap/훅/gitconfig/체크리스트)",
+    )
+    provision_parser.add_argument(
+        "--output", "-o", default="provision",
+        help="생성물 출력 디렉터리 (기본: provision)",
+    )
+    provision_parser.add_argument(
+        "--max-file-size-mb", type=float, default=5.0,
+        help="비-LFS 대용량 차단 임계 (MiB, 기본: 5)",
+    )
+
     subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
 
     service_parser = subparsers.add_parser("service", help="서비스 관리")
@@ -404,6 +417,46 @@ def _run_preflight(
         sys.exit(1)
 
 
+def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> None:
+    import dataclasses
+
+    from p4gitsync.services import provisioner
+
+    out_dir = Path(output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    max_bytes = int(max_file_size_mb * 1024 * 1024)
+    remote = config.git.remote_url or "git@gitlab.example.com:org/repo.git"
+    branch = config.git.default_branch
+
+    artifacts: dict[str, str] = {
+        "bootstrap-clone.sh": provisioner.generate_bootstrap_sh(remote, branch),
+        "bootstrap-clone.ps1": provisioner.generate_bootstrap_ps1(remote, branch),
+        "pre-receive": provisioner.generate_pre_receive_hook(max_bytes),
+        "recommended.gitconfig": provisioner.generate_gitconfig_snippet(),
+        "GITLAB-SETUP.md": provisioner.generate_gitlab_checklist(max_bytes),
+    }
+    # LFS 사용 시 하드닝된 .gitattributes도 함께 제공
+    if config.lfs.enabled:
+        hardened = dataclasses.replace(config.lfs, text_normalization=True)
+        artifacts[".gitattributes"] = hardened.generate_gitattributes()
+
+    for name, content in artifacts.items():
+        (out_dir / name).write_text(content, encoding="utf-8", newline="\n")
+
+    # 실행 권한 (POSIX)
+    for name in ("bootstrap-clone.sh", "pre-receive"):
+        try:
+            path = out_dir / name
+            path.chmod(path.stat().st_mode | 0o111)
+        except OSError:
+            pass
+
+    print(f"권장 설정 생성 완료: {out_dir.resolve()}")
+    for name in artifacts:
+        print(f"  - {name}")
+    print("\n다음: bootstrap-clone 으로 개발자 clone, pre-receive·GITLAB-SETUP.md 로 서버 게이트 설정")
+
+
 def _run_service(args) -> None:
     from pathlib import Path
 
@@ -479,6 +532,8 @@ def main() -> None:
             config, args.stream, getattr(args, "top_dirs", None),
             args.large_threshold_mb, args.output,
         )
+    elif command == "provision":
+        _run_provision(config, args.output, args.max_file_size_mb)
     else:
         _run_sync(config)
 
