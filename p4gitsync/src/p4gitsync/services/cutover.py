@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -9,7 +8,6 @@ from p4gitsync.config.sync_config import AppConfig
 from p4gitsync.git.git_operator import GitOperator
 from p4gitsync.notifications.notifier import SlackNotifier
 from p4gitsync.p4.p4_client import P4Client
-from p4gitsync.services.circuit_breaker import IntegrityCircuitBreaker
 from p4gitsync.services.commit_builder import CommitBuilder
 from p4gitsync.services.integrity_checker import IntegrityChecker
 from p4gitsync.state.state_store import StateStore
@@ -151,9 +149,14 @@ class CutoverManager:
                 )
             details.append("total_lag=0 확인")
 
-            # Phase A-3: 최종 무결성 검증
+            # Phase A-3: 최종 무결성 검증 (전략/병렬 = config.cutover)
             self._phase = CutoverPhase.INTEGRITY_VERIFY
-            integrity_result = self._integrity_checker.verify_full()
+            cv = self._config.cutover
+            integrity_result = self._integrity_checker.verify_cutover(
+                mode=cv.verify_mode,
+                sample_count=cv.verify_sample_count,
+                large_threshold_bytes=cv.verify_large_threshold_bytes,
+            )
             if not integrity_result.passed:
                 return CutoverResult(
                     success=False,
@@ -165,7 +168,8 @@ class CutoverManager:
                     details=details,
                 )
             details.append(
-                f"무결성 검증 통과: {integrity_result.checked_files}개 파일 확인"
+                f"무결성 검증 통과({integrity_result.strategy}): "
+                f"{integrity_result.checked_files}/{integrity_result.total_files}개 파일 확인"
             )
 
             # Phase A-4: 최종 push
@@ -236,10 +240,23 @@ class CutoverManager:
             info_webhook_url=slack.info_webhook_url,
         )
 
+        # LFS object store (LFS 파일 무결성 교차검증용) — 활성 시에만
+        lfs_store = None
+        if self._config.lfs.enabled:
+            from pathlib import Path
+
+            from p4gitsync.lfs.lfs_object_store import LfsObjectStore
+            repo_path = Path(self._config.git.repo_path)
+            git_dir = repo_path if self._config.git.bare else repo_path / ".git"
+            lfs_store = LfsObjectStore(git_dir=git_dir)
+
         self._integrity_checker = IntegrityChecker(
             p4_client=self._p4_client,
             repo_path=self._config.git.repo_path,
             stream=self._config.p4.stream,
+            lfs_store=lfs_store,
+            p4_config=self._config.p4,
+            max_workers=self._config.cutover.verify_workers,
         )
 
     def _cleanup(self) -> None:

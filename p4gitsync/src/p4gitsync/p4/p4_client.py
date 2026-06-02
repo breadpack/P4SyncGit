@@ -365,6 +365,59 @@ class P4Client:
             return None
 
     @_auto_reconnect
+    def head_digests(
+        self, depot_paths: list[str], batch_size: int = 200,
+    ) -> dict[str, tuple[str, int]]:
+        """head 리비전의 (MD5 digest, size) 를 {depot_path: (md5_lower, size)} 로 반환.
+
+        `p4 fstat -Ol` 로 콘텐츠 전송 없이 메타데이터만 받는다(무결성 교차검증용).
+        delete 리비전 및 digest/size 누락 항목은 제외한다.
+        """
+        out: dict[str, tuple[str, int]] = {}
+        if not depot_paths:
+            return out
+        specs = [f"{p}#head" for p in depot_paths]
+        for i in range(0, len(specs), batch_size):
+            chunk = specs[i:i + batch_size]
+            try:
+                results = self._p4.run_fstat(
+                    "-Ol", "-T", "depotFile,digest,fileSize,headAction", *chunk,
+                )
+            except P4Exception as e:
+                logger.warning("p4 fstat digest 배치 실패(스킵): %s", e)
+                continue
+            for d in results:
+                depot = d.get("depotFile")
+                if depot is None:
+                    continue
+                if "delete" in (d.get("headAction") or ""):
+                    continue
+                digest = d.get("digest")
+                size = d.get("fileSize")
+                if digest is None or size is None:
+                    continue
+                out[depot] = (str(digest).lower(), int(size))
+        return out
+
+    @_auto_reconnect
+    def print_head_to_disk(self, depot_path: str, dest_dir: Path) -> Path:
+        """#head 를 디스크로 직접 출력(메모리 로드 없음). 해시 fallback 용."""
+        import tempfile
+        fd, tmp_path_str = tempfile.mkstemp(dir=dest_dir, suffix=".verify.tmp")
+        os.close(fd)
+        dest_path = Path(tmp_path_str)
+        try:
+            self._p4.run_print("-o", str(dest_path), f"{depot_path}#head")
+        except P4Exception as e:
+            dest_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"p4 print -o 실패: {depot_path}#head: {e}"
+            ) from e
+        if not dest_path.exists():
+            raise RuntimeError(f"p4 print -o 후 파일 미생성: {dest_path}")
+        return dest_path
+
+    @_auto_reconnect
     def print_files_batch(
         self, file_specs: list[str],
     ) -> dict[str, bytes | None]:

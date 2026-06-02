@@ -136,6 +136,20 @@ class InitialImportConfig:
 
 
 @dataclass
+class CutoverConfig:
+    """P4→Git 컷오버 최종 무결성 검증 전략.
+
+    대형 depot 에서 전수 검사가 freeze 윈도우를 초과하지 않도록 통제한다.
+    - verify_mode: full(전수) | sample(무작위 N) | smart(대형 전수 + 나머지 샘플)
+    - verify_workers: 다중 P4 연결 병렬 검증 워커 수
+    """
+    verify_mode: str = "smart"
+    verify_sample_count: int = 1000
+    verify_workers: int = 4
+    verify_large_threshold_bytes: int = 5 * 1024 * 1024
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     format: str = "json"
@@ -246,6 +260,7 @@ class AppConfig:
     state: StateConfig
     sync: SyncConfig = field(default_factory=SyncConfig)
     initial_import: InitialImportConfig = field(default_factory=InitialImportConfig)
+    cutover: CutoverConfig = field(default_factory=CutoverConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
@@ -262,6 +277,7 @@ class AppConfig:
             state=StateConfig(**data.get("state", {})),
             sync=SyncConfig(**data.get("sync", {})),
             initial_import=InitialImportConfig(**data.get("initial_import", {})),
+            cutover=CutoverConfig(**data.get("cutover", {})),
             logging=LoggingConfig(**data.get("logging", {})),
             slack=SlackConfig(**data.get("slack", {})),
             api=ApiConfig(**data.get("api", {})),
