@@ -159,6 +159,23 @@ def _build_parser() -> argparse.ArgumentParser:
     pg_parser.add_argument("--no-lfs", action="store_true", help="LFS 비활성(기본: 활성)")
     pg_parser.add_argument("--dry-run", action="store_true", help="실제 호출 없이 적용 계획만 출력")
 
+    gh_parser = subparsers.add_parser(
+        "provision-github",
+        help="GitHub Rulesets API로 거버넌스 적용 (push ruleset/branch protection/merge queue)",
+    )
+    gh_parser.add_argument("--repo", "--repository", dest="repo", help="owner/repo (또는 env P4GITSYNC_GITHUB_REPO)")
+    gh_parser.add_argument("--token", help="GitHub 토큰 (미지정 시 env GITHUB_TOKEN / P4GITSYNC_GITHUB_TOKEN)")
+    gh_parser.add_argument("--api-url", help="GitHub API base URL (기본: https://api.github.com, GHES는 https://HOST/api/v3, env P4GITSYNC_GITHUB_API_URL)")
+    gh_parser.add_argument("--max-file-size-mb", type=float, default=5.0, help="push ruleset 대용량 차단 임계 (MB, 1~100, 기본: 5)")
+    gh_parser.add_argument("--protect", nargs="+", default=["main"], help="보호할 브랜치 (기본: main)")
+    gh_parser.add_argument("--merge-method", choices=["merge", "squash", "rebase"], default="merge", help="허용할 merge 방식 (기본: merge)")
+    gh_parser.add_argument("--merge-queue", action="store_true", help="merge queue 활성화 (GitLab merge train 대응)")
+    gh_parser.add_argument("--no-require-pr", action="store_true", help="PR 경유 강제 해제 (기본: PR 강제)")
+    gh_parser.add_argument("--required-approvals", type=int, default=1, help="PR 필수 승인 수 (기본: 1)")
+    gh_parser.add_argument("--status-check", nargs="+", default=[], help="필수 status check context 목록")
+    gh_parser.add_argument("--enforcement", choices=["active", "evaluate", "disabled"], default="active", help="ruleset 적용 모드 (기본: active)")
+    gh_parser.add_argument("--dry-run", action="store_true", help="실제 호출 없이 적용 계획만 출력")
+
     subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
 
     service_parser = subparsers.add_parser("service", help="서비스 관리")
@@ -519,6 +536,60 @@ def _run_provision_gitlab(args) -> None:
         sys.exit(1)
 
 
+def _run_provision_github(args) -> None:
+    import os
+
+    from p4gitsync.services.github_provisioner import (
+        GitHubClient,
+        GitHubProvisioner,
+        GitHubSpec,
+    )
+
+    repository = args.repo or os.environ.get("P4GITSYNC_GITHUB_REPO")
+    api_url = (
+        args.api_url
+        or os.environ.get("P4GITSYNC_GITHUB_API_URL")
+        or "https://api.github.com"
+    )
+    token = (
+        args.token
+        or os.environ.get("GITHUB_TOKEN")
+        or os.environ.get("P4GITSYNC_GITHUB_TOKEN")
+    )
+
+    if not repository or "/" not in repository:
+        print("--repo owner/repo (또는 env P4GITSYNC_GITHUB_REPO) 가 필요합니다.", file=sys.stderr)
+        sys.exit(2)
+    if not token and not args.dry_run:
+        print("GitHub 토큰이 필요합니다 (env GITHUB_TOKEN 또는 --token). --dry-run 은 토큰 없이 가능.", file=sys.stderr)
+        sys.exit(2)
+
+    spec = GitHubSpec(
+        max_file_size_mb=args.max_file_size_mb,
+        protected_branches=args.protect,
+        require_pull_request=not args.no_require_pr,
+        required_approving_review_count=args.required_approvals,
+        require_status_checks=bool(args.status_check),
+        status_check_contexts=args.status_check,
+        merge_queue=args.merge_queue,
+        merge_method=args.merge_method,
+        enforcement=args.enforcement,
+    )
+    client = GitHubClient(token or "", base_url=api_url)
+    provisioner = GitHubProvisioner(client, repository)
+    results = provisioner.apply(spec, dry_run=args.dry_run)
+
+    print(f"GitHub 프로비저닝: {repository} ({'DRY-RUN' if args.dry_run else api_url})")
+    failed = 0
+    for r in results:
+        mark = "[OK]" if r.ok else "[FAIL]"
+        if not r.ok:
+            failed += 1
+        print(f"  {mark} [{r.action}] {r.detail}")
+    if failed and not args.dry_run:
+        sys.exit(1)
+
+
 def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> None:
     import dataclasses
 
@@ -606,6 +677,9 @@ def main() -> None:
         return
     if command == "provision-gitlab":
         _run_provision_gitlab(args)
+        return
+    if command == "provision-github":
+        _run_provision_github(args)
         return
     if command == "status":
         from p4gitsync.cli.status_reporter import show_status
