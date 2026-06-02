@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from p4gitsync.config.sync_config import AppConfig
+from p4gitsync.git.commit_metadata import parse_p4cl_from_message
 from p4gitsync.git.git_operator import GitOperator
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.services.commit_builder import CommitBuilder
@@ -17,10 +18,9 @@ from p4gitsync.state.state_store import StateStore
 
 logger = logging.getLogger("p4gitsync.recovery")
 
-# commit message에서 P4CL 메타데이터를 추출하는 패턴
-_P4CL_PATTERN = re.compile(r"\[P4CL:\s*(\d+)\]")
+# Integration trailer 존재 여부 판정(대괄호 유무 모두 허용 — 현재 생성 포맷은 대괄호 없음).
 _INTEGRATION_PATTERN = re.compile(
-    r"\[Integration:\s*(//\S+)\s*->\s*(//\S+)\]"
+    r"(?:\[)?Integration:\s*(//\S+)\s*->\s*(//\S+)"
 )
 
 
@@ -66,11 +66,10 @@ def rebuild_state_from_git(
             sha = lines[0].strip()
             body = lines[1]
 
-            cl_match = _P4CL_PATTERN.search(body)
-            if not cl_match:
+            cl = parse_p4cl_from_message(body)
+            if cl is None:
                 continue
 
-            cl = int(cl_match.group(1))
             has_integration = bool(_INTEGRATION_PATTERN.search(body))
 
             state_store.record_commit(

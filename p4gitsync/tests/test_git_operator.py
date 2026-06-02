@@ -44,7 +44,7 @@ class TestPygit2GitOperator:
 
         repo = pygit2.Repository(repo_dir)
         commit = repo.get(repo.references.get("refs/heads/main").target)
-        assert "[P4CL: 1]" in commit.message
+        assert "P4CL: 1" in commit.message
 
     def test_create_sequential_commits(self, operator):
         sha1 = operator.create_commit(
