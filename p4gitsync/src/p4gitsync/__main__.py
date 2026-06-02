@@ -430,7 +430,12 @@ def _run_preflight(
             p4_client,
             lfs_config=config.lfs if config.lfs.enabled else None,
         )
-        report = checker.run(p4_stream, top_dirs=top_dirs, large_threshold=threshold)
+        report = checker.run(
+            p4_stream,
+            top_dirs=top_dirs,
+            large_threshold=threshold,
+            repo_path=config.git.repo_path or None,
+        )
     finally:
         p4_client.disconnect()
 

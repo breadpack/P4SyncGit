@@ -10,3 +10,4 @@ class P4FileAction:
     action: str          # add, edit, delete, move/add, move/delete, integrate, branch
     file_type: str       # text, binary, ...
     revision: int
+    size: int | None = None  # 바이트. LFS 라우팅용으로 lazy 채움(p4 sizes). None=미상

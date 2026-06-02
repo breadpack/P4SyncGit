@@ -5,7 +5,7 @@ from functools import wraps
 from pathlib import Path
 from typing import TypeVar, Callable, ParamSpec
 
-from P4 import P4, P4Exception
+from P4 import P4, OutputHandler, P4Exception
 
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_file_action import P4FileAction
@@ -17,6 +17,41 @@ T = TypeVar("T")
 
 _MAX_RECONNECT_RETRIES = 3
 _BASE_RECONNECT_DELAY = 1.0
+
+
+class _HeadPrefixHandler(OutputHandler):
+    """파일 앞부분만 부분 수신하고 한도 도달 시 명령을 취소하는 OutputHandler.
+
+    null-byte sniff 용도로 대형 파일 전체를 받지 않도록 한도(limit) 도달 즉시
+    CANCEL 을 반환해 p4 print 전송을 끊는다.
+    """
+
+    def __init__(self, limit: int) -> None:
+        OutputHandler.__init__(self)
+        self._limit = limit
+        self.buf = bytearray()
+        self.received = False
+
+    def _accumulate(self, data) -> int:
+        self.received = True
+        if isinstance(data, str):
+            data = data.encode("utf-8", "replace")
+        self.buf.extend(data)
+        if len(self.buf) >= self._limit:
+            return OutputHandler.CANCEL
+        return OutputHandler.HANDLED
+
+    def outputBinary(self, data) -> int:
+        return self._accumulate(data)
+
+    def outputText(self, data) -> int:
+        return self._accumulate(data)
+
+    def outputStat(self, stat) -> int:
+        return OutputHandler.HANDLED
+
+    def outputMessage(self, msg) -> int:
+        return OutputHandler.HANDLED
 
 
 _MAX_AUTO_RECONNECT_ATTEMPTS = 3
@@ -147,6 +182,75 @@ class P4Client:
             if depot_file is None:
                 continue
             out.append((depot_file, int(d.get("fileSize") or 0)))
+        return out
+
+    @_auto_reconnect
+    def fill_sizes(self, actions: list[P4FileAction], batch_size: int = 200) -> None:
+        """size 가 None 인 P4FileAction 들의 크기를 batch `p4 sizes` 로 채운다(in-place).
+
+        LFS 라우팅 판정 전에 "binary 타입인데 확장자 미스"인 소수 파일의 크기만
+        선조회하는 용도. 이미 size 가 채워진 항목은 건너뛴다.
+        """
+        pending = [a for a in actions if a.size is None]
+        if not pending:
+            return
+        by_depot: dict[str, P4FileAction] = {a.depot_path: a for a in pending}
+        specs = [f"{a.depot_path}#{a.revision}" for a in pending]
+        for i in range(0, len(specs), batch_size):
+            chunk = specs[i:i + batch_size]
+            try:
+                results = self._p4.run_sizes(*chunk)
+            except P4Exception as e:
+                logger.warning("p4 sizes 배치 실패(스킵): %s", e)
+                continue
+            for d in results:
+                depot_file = d.get("depotFile")
+                action = by_depot.get(depot_file) if depot_file else None
+                if action is not None:
+                    action.size = int(d.get("fileSize") or 0)
+
+    @_auto_reconnect
+    def read_head_prefix(
+        self, depot_path: str, revision: int, n: int = 8192,
+    ) -> bytes | None:
+        """파일 앞 n 바이트만 부분 전송으로 읽는다(null-byte sniff 용).
+
+        OutputHandler 로 한도 도달 시 CANCEL 하여 대형 파일이어도 앞부분만 받는다.
+        추출 실패(obliterate 등)나 빈 수신이면 None 을 반환한다.
+        """
+        handler = _HeadPrefixHandler(n)
+        self._p4.handler = handler
+        try:
+            self._p4.run_print(f"{depot_path}#{revision}")
+        except P4Exception:
+            # CANCEL 로 인한 중단 또는 추출 실패 — 받은 데이터가 있으면 그대로 사용
+            pass
+        finally:
+            self._p4.handler = None
+        if not handler.received:
+            return None
+        return bytes(handler.buf[:n])
+
+    @_auto_reconnect
+    def iter_head_files_with_type(self, path: str) -> list[tuple[str, int, str]]:
+        """경로 head 파일의 (depot_path, size, head_type) 목록을 반환.
+
+        preflight 의 type+size 라우팅 정렬용. `p4 fstat -Ol` 로 size 와 headType 을
+        한 번에 받아 별도 sizes/타입 스캔을 합친다. delete 리비전은 제외한다.
+        """
+        results = self._p4.run_fstat(
+            "-Ol", "-T", "depotFile,fileSize,headType,headAction", path,
+        )
+        out: list[tuple[str, int, str]] = []
+        for d in results:
+            depot_file = d.get("depotFile")
+            if depot_file is None:
+                continue
+            if "delete" in (d.get("headAction") or ""):
+                continue
+            size = int(d.get("fileSize") or 0)
+            head_type = d.get("headType") or ""
+            out.append((depot_file, size, head_type))
         return out
 
     @staticmethod

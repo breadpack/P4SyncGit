@@ -29,6 +29,11 @@ class LfsConfig:
         ]
     )
     size_threshold_bytes: int = 100 * 1024  # 100KB
+    # 확장자 화이트리스트에 없어도 P4 file_type 이 binary 인 파일을 크기 임계로
+    # LFS 라우팅할지 여부. 기본 비활성(확장자 전용, 기존 동작 유지).
+    auto_detect_binary: bool = False
+    # binary 자동 라우팅에 쓸 크기 임계. None 이면 size_threshold_bytes 를 사용.
+    binary_size_threshold_bytes: int | None = None
     lockable_extensions: list[str] = field(
         default_factory=lambda: [
             ".uasset",
@@ -88,10 +93,47 @@ class LfsConfig:
             lines.append("    access = basic")
         return "\n".join(lines) + "\n"
 
-    def is_lfs_target(self, path: str) -> bool:
-        """경로의 확장자가 LFS 대상인지 확인."""
+    def is_lfs_target_ext(self, path: str) -> bool:
+        """경로의 확장자가 LFS 확장자 화이트리스트에 있는지 확인."""
         _, ext = os.path.splitext(path)
         return ext.lower() in self.extensions
+
+    def is_lfs_target(self, path: str) -> bool:
+        """경로의 확장자가 LFS 대상인지 확인(확장자 전용, 하위호환 유지)."""
+        return self.is_lfs_target_ext(path)
+
+    @property
+    def effective_binary_threshold(self) -> int:
+        """binary 자동 라우팅에 적용할 크기 임계(바이트).
+
+        binary_size_threshold_bytes 가 지정되면 그 값을, 아니면 size_threshold_bytes 를 쓴다.
+        """
+        if self.binary_size_threshold_bytes is not None:
+            return self.binary_size_threshold_bytes
+        return self.size_threshold_bytes
+
+    def route_to_lfs(
+        self,
+        *,
+        git_path: str,
+        file_type: str,
+        size: int | None,
+        sniff_head: bytes | None = None,
+    ) -> bool:
+        """파일을 LFS 로 보낼지 결정한다.
+
+        확장자 매칭 OR (binary 타입 AND size >= 임계). 판정 로직은
+        lfs_routing.decide_lfs_route 에 위임한다.
+        """
+        from p4gitsync.lfs.lfs_routing import decide_lfs_route
+
+        return decide_lfs_route(
+            git_path=git_path,
+            file_type=file_type,
+            size=size,
+            cfg=self,
+            sniff_head=sniff_head,
+        )
 
     def is_lockable(self, path: str) -> bool:
         """P4 +l (exclusive lock) 타입에 해당하는 LFS lockable 파일인지 확인."""

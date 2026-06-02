@@ -104,6 +104,21 @@ remote_url = ""
 | checkpoint_interval | `P4GITSYNC_INITIAL_IMPORT_CHECKPOINT_INTERVAL` | int | `1000` | 체크포인트 저장 주기 (CL 수) |
 | use_fast_import | `P4GITSYNC_INITIAL_IMPORT_USE_FAST_IMPORT` | bool | `true` | git fast-import 사용 |
 | replica_port | `P4GITSYNC_INITIAL_IMPORT_REPLICA_PORT` | str | `""` | P4 replica 서버 포트 (대규모 import 시 부하 분산) |
+| server_load_threshold | `P4GITSYNC_INITIAL_IMPORT_SERVER_LOAD_THRESHOLD` | int | `50` | P4 활성 명령 수가 이 값을 넘으면 throttle |
+| throttle_wait_seconds | `P4GITSYNC_INITIAL_IMPORT_THROTTLE_WAIT_SECONDS` | int | `60` | throttle 시 대기 시간(초) |
+| streaming_file_threshold | `P4GITSYNC_INITIAL_IMPORT_STREAMING_FILE_THRESHOLD` | int | `2000` | normal 파일 수가 이 값 이상인 대형 CL은 메모리 스트리밍 처리 |
+| streaming_bytes_threshold | `P4GITSYNC_INITIAL_IMPORT_STREAMING_BYTES_THRESHOLD` | int | `268435456` | 알려진 누적 크기가 이 값(256MiB) 이상이면 스트리밍 처리 |
+| repack_interval_checkpoints | `P4GITSYNC_INITIAL_IMPORT_REPACK_INTERVAL_CHECKPOINTS` | int | `0` | >0이면 N checkpoint마다 `git repack -ad`로 중간 통합. 0=비활성 |
+
+### 대용량(TiB급) import 가이드
+
+- **메모리**: 파일 수가 많거나 누적이 큰 대형 CL은 content를 메모리에 모으지 않고 chunk 단위로
+  추출·write(스트리밍)해 OOM을 방지한다. 임계는 `streaming_file_threshold`/`streaming_bytes_threshold`.
+- **P4 서버 보호**: `server_load_threshold`/`throttle_wait_seconds`로 checkpoint 지점마다 서버 부하를
+  확인하고 과부하 시 대기한다.
+- **디스크/pack**: 전체 history를 LFS로 변환하면 `.git/lfs/objects`에 수 TB가 쌓이고 최종 gc가 디스크
+  여유를 크게 요구한다. `preflight`가 로컬 디스크 여유를 점검하며, `repack_interval_checkpoints`로
+  중간 repack을 켜면 pack 파편화와 최종 gc 부담을 분산할 수 있다.
 
 ---
 
@@ -169,6 +184,8 @@ remote_url = ""
 | enabled | `P4GITSYNC_LFS_ENABLED` | bool | `false` | Git LFS 활성화 |
 | extensions | — | list[str] | 아래 참조 | LFS 대상 확장자 목록 |
 | size_threshold_bytes | `P4GITSYNC_LFS_SIZE_THRESHOLD_BYTES` | int | `102400` | 크기 임계값 (100KB) |
+| auto_detect_binary | `P4GITSYNC_LFS_AUTO_DETECT_BINARY` | bool | `false` | 확장자에 없어도 P4 file_type 이 binary 인 파일을 크기 임계로 LFS 라우팅 |
+| binary_size_threshold_bytes | `P4GITSYNC_LFS_BINARY_SIZE_THRESHOLD_BYTES` | int | `null` | binary 자동 라우팅 크기 임계. 미지정 시 `size_threshold_bytes` 사용 |
 | lockable_extensions | — | list[str] | 아래 참조 | P4 exclusive lock 대상 확장자 |
 | server_type | `P4GITSYNC_LFS_SERVER_TYPE` | str | `"builtin"` | LFS 서버 타입 (`"builtin"` / `"self-hosted"`) |
 | server_url | `P4GITSYNC_LFS_SERVER_URL` | str | `""` | self-hosted LFS 서버 URL |
@@ -191,6 +208,20 @@ remote_url = ""
 - 첫 commit에서 `.gitattributes`와 `.lfsconfig` 자동 생성
 - LFS 대상 파일은 실제 내용 대신 LFS 포인터로 저장
 - 포인터 형식: `version https://git-lfs.github.com/spec/v1\noid sha256:{hash}\nsize {bytes}`
+
+### 라우팅 규칙 (text/binary 자동 판단)
+
+LFS 라우팅 판정: **확장자 화이트리스트 매칭 OR (binary 타입 AND size ≥ 임계)**.
+
+- `auto_detect_binary=false`(기본): 확장자 화이트리스트만으로 판정(기존 동작).
+- `auto_detect_binary=true`: P4 가 파일에 매긴 `file_type`(text/binary, 추가 P4 호출 없음)을
+  1차 신호로 사용. 확장자에 없어도 binary 이고 크기가 임계 이상이면 LFS 로 라우팅한다.
+  타입이 불명확한 파일만 앞부분을 부분 전송해 null-byte 로 보정한다.
+- 효과: 확장자 없는 빌드 산출물, `.pak`/`.uexp` 등 대형 binary 가 git 본문(history)에
+  영구히 박히는 것을 방지한다. 크기 미상의 binary 는 안전하게 LFS 로 라우팅한다.
+- `setup` 마법사가 depot 을 스캔해 화이트리스트에 없는 binary 를 찾아 활성화를 제안한다.
+- `preflight` 의 비-LFS 대용량 리포트도 이 규칙과 일치하게 동작한다(`auto_detect_binary=true`
+  일 때 자동 라우팅될 파일은 blocker 에서 제외).
 
 ---
 

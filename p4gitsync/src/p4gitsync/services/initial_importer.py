@@ -13,6 +13,7 @@ from p4gitsync.git.commit_metadata import CommitMetadata
 from p4gitsync.git.fast_importer import FastImporter
 from p4gitsync.git.file_mode import git_mode_from_p4_type
 from p4gitsync.lfs.lfs_object_store import LfsObjectStore
+from p4gitsync.lfs.lfs_routing import partition_for_lfs
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.p4.p4_file_action import ADD_EDIT_ACTIONS, DELETE_ACTIONS, P4FileAction
@@ -40,6 +41,10 @@ class _CLData:
     deletes: list[str] = field(default_factory=list)
     file_count: int = 0
     skipped: bool = False  # 최적화 #3: virtual filter로 파일 0개
+    # 대형 CL 메모리 스트리밍: content 를 모으지 않고 메인이 write 시점에 추출.
+    streaming: bool = False
+    normal_files: list[tuple[P4FileAction, str]] = field(default_factory=list)
+    lfs_files: list[tuple[P4FileAction, str]] = field(default_factory=list)
 
 
 class InitialImporter:
@@ -80,8 +85,13 @@ class InitialImporter:
 
         cfg = config or InitialImportConfig()
         self._checkpoint_interval = cfg.checkpoint_interval
-        self._server_load_threshold = 50
-        self._throttle_wait_seconds = 60
+        self._server_load_threshold = cfg.server_load_threshold
+        self._throttle_wait_seconds = cfg.throttle_wait_seconds
+        self._streaming_file_threshold = cfg.streaming_file_threshold
+        self._streaming_bytes_threshold = cfg.streaming_bytes_threshold
+        self._repack_interval = cfg.repack_interval_checkpoints
+        self._checkpoint_count = 0
+        self._main_extract_client: P4Client | None = None
         self._worker_stats: list[dict] = [
             {"cls": 0, "files": 0, "elapsed": 0.0} for _ in range(_PREFETCH_WORKERS)
         ]
@@ -90,16 +100,16 @@ class InitialImporter:
         """전체 히스토리 import 실행."""
         last_cl = self._state.get_last_synced_cl(self._stream)
 
-        # 전체 CL 목록 (진행률 계산용)
-        all_total_changes = self._p4.get_all_changes(self._poll_stream)
-        grand_total = len(all_total_changes)
-        already_done = 0
-        if last_cl > 0 and all_total_changes:
-            # last_cl 이하인 CL 수 = 이미 처리된 수
-            already_done = sum(1 for c in all_total_changes if c <= last_cl)
-        del all_total_changes
-
-        all_changes = self._p4.get_changes_after(self._poll_stream, last_cl)
+        # 전체 CL 을 한 번만 조회해 진행률과 남은 목록을 함께 계산(중복 호출 제거).
+        all_full = self._p4.get_changes_after(self._poll_stream, 0)
+        grand_total = len(all_full)
+        if last_cl > 0:
+            already_done = sum(1 for c in all_full if c <= last_cl)
+            all_changes = [c for c in all_full if c > last_cl]
+        else:
+            already_done = 0
+            all_changes = all_full
+        del all_full
 
         if not all_changes:
             logger.info("import 대상 CL 없음 (stream=%s)", self._stream)
@@ -119,6 +129,8 @@ class InitialImporter:
         stop_event = threading.Event()
 
         prefetch_clients = self._create_prefetch_clients(_PREFETCH_WORKERS)
+        # 대형 CL 스트리밍용 메인 전용 연결(워커 연결은 다음 묶음 추출로 점유 중이라 재사용 불가).
+        self._main_extract_client = self._create_prefetch_clients(1)[0]
         # LFS 병렬 추출용 워커별 전용 연결 (재사용)
         self._lfs_clients: list[P4Client] = []
         if self._lfs_store and self._lfs and self._lfs.enabled:
@@ -177,7 +189,7 @@ class InitialImporter:
                     self._write_cl_to_importer(cl_data, i, branch, fast_importer)
                     last_written_cl = cl
                     actual_processed = next_i
-                except OSError as e:
+                except (OSError, ContentExtractionError) as e:
                     error_cls.append(cl)
                     logger.error(
                         "fast-import write 실패, import 중단 (CL %d): %s", cl, e,
@@ -214,6 +226,14 @@ class InitialImporter:
                         bar, global_pct,
                         head_sha[:8] if head_sha else "N/A", cl,
                     )
+                    # fast-import 프로세스가 없는 시점에 중간 repack/throttle 수행.
+                    self._checkpoint_count += 1
+                    if (
+                        self._repack_interval > 0
+                        and self._checkpoint_count % self._repack_interval == 0
+                    ):
+                        self._run_repack()
+                    self._throttle_if_needed()
                     fast_importer = FastImporter(self._repo_path)
                     fast_importer.start()
 
@@ -233,6 +253,12 @@ class InitialImporter:
                 except Exception:
                     pass
             self._lfs_clients = []
+            if self._main_extract_client is not None:
+                try:
+                    self._main_extract_client.disconnect()
+                except Exception:
+                    pass
+                self._main_extract_client = None
             prefetch_thread.join(timeout=5)
 
         if last_written_cl > 0 and final_rc == 0:
@@ -394,13 +420,21 @@ class InitialImporter:
             data.skipped = True
             return data
 
-        normal_files: list[tuple[P4FileAction, str]] = []
-        lfs_files: list[tuple[P4FileAction, str]] = []
-        for fa, git_path in add_edit_files:
-            if self._lfs_store and self._lfs and self._lfs.is_lfs_target(git_path):
-                lfs_files.append((fa, git_path))
-            else:
-                normal_files.append((fa, git_path))
+        if self._lfs_store and self._lfs:
+            # 확장자 OR (binary 타입 AND 크기임계)로 LFS 라우팅. auto_detect_binary 가
+            # 꺼져 있으면 확장자 전용(기존 동작). ambiguous 파일만 p4 sizes 선조회.
+            lfs_files, normal_files = partition_for_lfs(add_edit_files, self._lfs, p4)
+        else:
+            normal_files = list(add_edit_files)
+            lfs_files = []
+
+        # 대형 CL 은 content 를 메모리에 모으지 않고 메인이 write 시점에 스트리밍 추출.
+        if self._is_streaming_cl(normal_files):
+            data.streaming = True
+            data.normal_files = normal_files
+            data.lfs_files = lfs_files
+            data.file_count = len(add_edit_files) + len(data.deletes)
+            return data
 
         total_normal = len(normal_files)
         total_lfs = len(lfs_files)
@@ -608,12 +642,69 @@ class InitialImporter:
 
         for git_path in cl_data.deletes:
             fast_importer.write_delete(git_path)
-        for git_path, content, mode in cl_data.normal_results:
-            fast_importer.write_file(git_path, content, mode)
-        for git_path, pointer_bytes in cl_data.lfs_results:
-            fast_importer.write_file(git_path, pointer_bytes)
+
+        if cl_data.streaming:
+            # 대형 CL: 메인 전용 연결로 chunk 단위 추출하며 즉시 write(메모리 가드).
+            self._stream_normal_to_importer(cl_data, fast_importer)
+            self._stream_lfs_to_importer(cl_data, fast_importer)
+        else:
+            for git_path, content, mode in cl_data.normal_results:
+                fast_importer.write_file(git_path, content, mode)
+            for git_path, pointer_bytes in cl_data.lfs_results:
+                fast_importer.write_file(git_path, pointer_bytes)
 
         fast_importer.end_commit()
+
+    def _is_streaming_cl(self, normal_files: list[tuple[P4FileAction, str]]) -> bool:
+        """normal 파일 수 또는 (알려진) 누적 크기가 임계를 넘으면 스트리밍 대상."""
+        if len(normal_files) >= self._streaming_file_threshold:
+            return True
+        known = sum(fa.size for fa, _ in normal_files if fa.size is not None)
+        return known >= self._streaming_bytes_threshold
+
+    def _stream_normal_to_importer(
+        self, cl_data: _CLData, fast_importer: FastImporter,
+    ) -> None:
+        """normal 파일을 chunk 단위로 추출해 즉시 write. content 를 누적하지 않는다."""
+        p4 = self._main_extract_client
+        missing: list[str] = []
+        nf = cl_data.normal_files
+        for s in range(0, len(nf), _BATCH_PRINT_SIZE):
+            chunk = nf[s:s + _BATCH_PRINT_SIZE]
+            specs = [f"{fa.depot_path}#{fa.revision}" for fa, _ in chunk]
+            batch = p4.print_files_batch(specs)
+            for fa, git_path in chunk:
+                content = batch.get(fa.depot_path)
+                if content is None:
+                    missing.append(f"{fa.depot_path}#{fa.revision}")
+                    continue
+                fast_importer.write_file(
+                    git_path, content, git_mode_from_p4_type(fa.file_type),
+                )
+            del batch  # chunk 즉시 해제
+        if missing:
+            raise ContentExtractionError(cl_data.cl, missing)
+
+    def _stream_lfs_to_importer(
+        self, cl_data: _CLData, fast_importer: FastImporter,
+    ) -> None:
+        """LFS 파일을 디스크 스트리밍(4MB 청크)으로 추출해 포인터를 write."""
+        if not cl_data.lfs_files:
+            return
+        p4 = self._main_extract_client
+        missing: list[str] = []
+        for fa, git_path in cl_data.lfs_files:
+            try:
+                tmp_path = p4.print_file_to_disk(
+                    fa.depot_path, fa.revision, self._lfs_store.tmp_dir,
+                )
+            except Exception:
+                missing.append(f"{fa.depot_path}#{fa.revision}")
+                continue
+            pointer = self._lfs_store.store_from_file(tmp_path)
+            fast_importer.write_file(git_path, pointer.pointer_bytes)
+        if missing:
+            raise ContentExtractionError(cl_data.cl, missing)
 
     # ── 유틸 ─────────────────────────────────────────
 
@@ -684,6 +775,22 @@ class InitialImporter:
                 time.sleep(self._throttle_wait_seconds)
         except Exception:
             logger.exception("서버 부하 확인 중 오류 발생")
+
+    def _run_repack(self) -> None:
+        """중간 repack 으로 packfile 파편화를 통합(디스크/시간 분산). 실패해도 import 계속."""
+        logger.info("git repack -ad 중간 통합 실행 (checkpoint %d)...", self._checkpoint_count)
+        result = subprocess.run(
+            ["git", "repack", "-ad", "-q"],
+            cwd=self._repo_path,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            logger.info("git repack 완료")
+        else:
+            logger.warning(
+                "git repack 실패(무시): %s",
+                result.stderr.decode(errors="replace")[-200:],
+            )
 
     def _post_import(self, branch: str, last_cl: int) -> None:
         head_sha = self._get_head_sha(branch)

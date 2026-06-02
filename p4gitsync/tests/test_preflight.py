@@ -58,6 +58,52 @@ class TestDetectNonLfsLarge:
         out = detect_non_lfs_large(files, None, threshold_bytes=5 * 1024 * 1024)
         assert [p for p, _ in out] == ["//d/b.bin", "//d/a.bin"]
 
+    def test_file_types_excludes_binary_routed(self):
+        # auto_detect_binary 켜짐 + file_types 제공 → binary 대형은 route_to_lfs 로
+        # 이미 LFS 가므로 리포트에서 제외, text 대형만 남는다.
+        cfg = LfsConfig(
+            enabled=True, extensions=[".png"],
+            auto_detect_binary=True, size_threshold_bytes=1024,
+        )
+        files = [("//d/blob", 10_000_000), ("//d/big.log", 8_000_000)]
+        types = {"//d/blob": "binary", "//d/big.log": "text"}
+        out = detect_non_lfs_large(
+            files, cfg, threshold_bytes=5 * 1024 * 1024, file_types=types,
+        )
+        assert out == [("//d/big.log", 8_000_000)]
+
+    def test_file_types_none_falls_back_to_ext(self):
+        # file_types 미지정 → 기존 확장자 기준(회귀)
+        cfg = LfsConfig(enabled=True, extensions=[".png"], auto_detect_binary=True)
+        files = [("//d/blob", 10_000_000)]
+        out = detect_non_lfs_large(files, cfg, threshold_bytes=5 * 1024 * 1024)
+        assert out == [("//d/blob", 10_000_000)]
+
+
+class TestRecommendDiskHeadroom:
+    def test_sufficient(self):
+        from p4gitsync.services.preflight import recommend_disk_headroom
+
+        ok, msg = recommend_disk_headroom(1000, 2000, safety_factor=1.5)
+        assert ok is True  # 필요 1500 <= 여유 2000
+        assert "≥" in msg
+
+    def test_insufficient(self):
+        from p4gitsync.services.preflight import recommend_disk_headroom
+
+        ok, msg = recommend_disk_headroom(1000, 1200, safety_factor=1.5)
+        assert ok is False  # 필요 1500 > 여유 1200
+        assert "확보" in msg
+
+    def test_safety_factor_applied(self):
+        from p4gitsync.services.preflight import recommend_disk_headroom
+
+        # 여유가 소요와 같아도 safety_factor 때문에 부족
+        ok, _ = recommend_disk_headroom(1000, 1000, safety_factor=1.5)
+        assert ok is False
+        ok2, _ = recommend_disk_headroom(1000, 1000, safety_factor=1.0)
+        assert ok2 is True
+
 
 class TestRecommendHistoryStrategy:
     def test_small_history_full(self):

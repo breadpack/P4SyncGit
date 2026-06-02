@@ -61,18 +61,30 @@ def detect_non_lfs_large(
     files: list[tuple[str, int]],
     lfs_config: LfsConfig | None,
     threshold_bytes: int = _DEFAULT_LARGE_THRESHOLD,
+    *,
+    file_types: dict[str, str] | None = None,
 ) -> list[tuple[str, int]]:
     """LFS 추적 대상이 아닌데 threshold를 넘는 (path, size) 목록을 반환.
 
     그대로 커밋하면 git 본문에 영구히 박혀(F1) 제거에 history rewrite가 필요하다.
     크기 내림차순 정렬.
+
+    file_types({path: p4_type})가 주어지면 확장자뿐 아니라 type+size 라우팅
+    (route_to_lfs)으로 이미 LFS 로 갈 파일을 제외해, 실제로 미처리되는 대용량만
+    리포트한다(import 라우팅과 일치). 미지정 시 기존 확장자 기준.
     """
     out: list[tuple[str, int]] = []
     for path, size in files:
         if size <= threshold_bytes:
             continue
-        if lfs_config is not None and lfs_config.is_lfs_target(path):
-            continue
+        if lfs_config is not None:
+            if file_types is not None:
+                if lfs_config.route_to_lfs(
+                    git_path=path, file_type=file_types.get(path, ""), size=size,
+                ):
+                    continue
+            elif lfs_config.is_lfs_target(path):
+                continue
         out.append((path, size))
     out.sort(key=lambda x: x[1], reverse=True)
     return out
@@ -101,6 +113,30 @@ def recommend_history_strategy(
         "truncate",
         f"전체 history {_fmt(history_bytes)} (head 대비 {ratio:.1f}배). "
         f"과거 에셋 리비전 조회 필요성이 낮으면 head/최근 절단 권장.",
+    )
+
+
+def recommend_disk_headroom(
+    required_bytes: int,
+    free_bytes: int,
+    safety_factor: float = 1.5,
+) -> tuple[bool, str]:
+    """추정 소요(required) 대비 로컬 디스크 여유(free)가 충분한지 판정.
+
+    LFS object 전체 + git pack + 최종 gc 임시 공간을 합쳐 ``required × safety_factor``
+    가 필요하다고 보고 비교한다. (ok, 사람이 읽는 메시지)를 반환한다.
+    """
+    needed = int(required_bytes * safety_factor)
+    if free_bytes >= needed:
+        return (
+            True,
+            f"여유 {_fmt(free_bytes)} ≥ 권장 {_fmt(needed)} "
+            f"(소요 {_fmt(required_bytes)} × {safety_factor}).",
+        )
+    return (
+        False,
+        f"여유 {_fmt(free_bytes)} < 권장 {_fmt(needed)} "
+        f"(소요 {_fmt(required_bytes)} × {safety_factor}). 공간 확보가 필요합니다.",
     )
 
 
@@ -137,11 +173,20 @@ class PreflightReport:
     case_collisions: list[list[str]] = field(default_factory=list)
     non_lfs_large: list[tuple[str, int]] = field(default_factory=list)
     large_threshold: int = _DEFAULT_LARGE_THRESHOLD
+    disk_checked: bool = False
+    disk_free_bytes: int = 0
+    disk_required_bytes: int = 0
+    disk_ok: bool = True
+    disk_msg: str = ""
 
     @property
     def has_blockers(self) -> bool:
         """마이그레이션 전 반드시 해결해야 하는 항목이 있는가."""
-        return bool(self.case_collisions) or bool(self.non_lfs_large)
+        return (
+            bool(self.case_collisions)
+            or bool(self.non_lfs_large)
+            or (self.disk_checked and not self.disk_ok)
+        )
 
     def format_report(self) -> str:
         lines: list[str] = []
@@ -181,11 +226,32 @@ class PreflightReport:
         else:
             lines.append("  [OK] 없음")
         lines.append("")
+        lines.append("[5] 로컬 디스크 여유 (LFS 변환 + git pack/gc 상한)")
+        if self.disk_checked:
+            tag = "[OK]" if self.disk_ok else "[BLOCKER]"
+            lines.append(f"  {tag} {self.disk_msg}")
+        else:
+            lines.append("  [SKIP] repo 경로 미지정 — 디스크 점검 생략")
+        lines.append("")
         lines.append("=" * 60)
         lines.append("판정: " + ("[BLOCKER] BLOCKER 있음 — 위 항목 해결 후 진행" if self.has_blockers
                                 else "[OK] 통과 — 마이그레이션 진행 가능"))
         lines.append("=" * 60)
         return "\n".join(lines)
+
+
+def _probe_free_bytes(path: str) -> int:
+    """경로(미생성 가능)에서 가장 가까운 존재 상위로 올라가 free 바이트를 구한다."""
+    import shutil
+    from pathlib import Path
+
+    p = Path(path)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        return shutil.disk_usage(str(p)).free
+    except OSError:
+        return 0
 
 
 class PreflightChecker:
@@ -200,6 +266,7 @@ class PreflightChecker:
         stream: str,
         top_dirs: list[str] | None = None,
         large_threshold: int = _DEFAULT_LARGE_THRESHOLD,
+        repo_path: str | None = None,
     ) -> PreflightReport:
         report = PreflightReport(stream=stream, large_threshold=large_threshold)
 
@@ -221,9 +288,27 @@ class PreflightChecker:
 
         # [3]/[4] 파일별 스캔 (head)
         logger.info("파일 목록 수집 중 (head)... 대형 depot은 시간이 걸릴 수 있습니다")
-        file_sizes = self._p4.iter_file_sizes(f"{stream}/...#head")
+        file_types: dict[str, str] | None = None
+        if self._lfs is not None and self._lfs.auto_detect_binary:
+            # auto_detect_binary 활성 시에만 타입까지 수집(import 라우팅과 일치).
+            triples = self._p4.iter_head_files_with_type(f"{stream}/...#head")
+            file_sizes = [(p, s) for p, s, _ in triples]
+            file_types = {p: t for p, s, t in triples}
+        else:
+            file_sizes = self._p4.iter_file_sizes(f"{stream}/...#head")
         paths = [p for p, _ in file_sizes]
         report.case_collisions = detect_case_collisions(paths)
-        report.non_lfs_large = detect_non_lfs_large(file_sizes, self._lfs, large_threshold)
+        report.non_lfs_large = detect_non_lfs_large(
+            file_sizes, self._lfs, large_threshold, file_types=file_types,
+        )
+
+        # [5] 로컬 디스크 여유 (전체 history 용량을 LFS 변환 상한으로 추정)
+        if repo_path:
+            free = _probe_free_bytes(repo_path)
+            required = report.history_bytes
+            report.disk_checked = True
+            report.disk_free_bytes = free
+            report.disk_required_bytes = required
+            report.disk_ok, report.disk_msg = recommend_disk_headroom(required, free)
 
         return report

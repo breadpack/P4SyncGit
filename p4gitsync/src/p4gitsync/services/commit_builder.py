@@ -7,6 +7,7 @@ from p4gitsync.errors import ContentExtractionError
 from p4gitsync.git.commit_metadata import CommitMetadata, IntegrationCommitInfo
 from p4gitsync.git.file_mode import GIT_MODE_FILE, git_mode_from_p4_type
 from p4gitsync.lfs.lfs_object_store import LfsObjectStore
+from p4gitsync.lfs.lfs_routing import partition_for_lfs
 from p4gitsync.git.git_operator import GitOperator
 from p4gitsync.p4.merge_analyzer import MergeAnalyzer, MergeInfo
 from p4gitsync.p4.p4_change_info import P4ChangeInfo
@@ -201,14 +202,15 @@ class CommitBuilder:
             elif fa.action in ADD_EDIT_ACTIONS:
                 add_edit_files.append((fa, git_path))
 
-        # LFS 대상 파일과 비-LFS 파일 분리
-        lfs_files: list[tuple[P4FileAction, str]] = []
-        non_lfs_files: list[tuple[P4FileAction, str]] = []
-        for fa, git_path in add_edit_files:
-            if self._lfs_store and self._lfs and self._lfs.is_lfs_target(git_path):
-                lfs_files.append((fa, git_path))
-            else:
-                non_lfs_files.append((fa, git_path))
+        # LFS 대상 파일과 비-LFS 파일 분리. 확장자 OR (binary 타입 AND 크기임계).
+        # auto_detect_binary 가 꺼져 있으면 확장자 전용(기존 동작).
+        if self._lfs_store and self._lfs:
+            lfs_files, non_lfs_files = partition_for_lfs(
+                add_edit_files, self._lfs, self._p4,
+            )
+        else:
+            non_lfs_files = list(add_edit_files)
+            lfs_files = []
 
         # 비-LFS 파일: batch print 모드 (파일 수가 2개 이상이면 일괄 추출)
         if len(non_lfs_files) >= 2:

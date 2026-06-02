@@ -261,6 +261,66 @@ def _detect_binary_extensions(p4_config: dict[str, Any]) -> list[str]:
     return sorted(extensions)
 
 
+def _scan_unhandled_binaries(
+    p4_config: dict[str, Any],
+    known_exts: set[str],
+    sample_cls: int = 200,
+) -> tuple[list[str], dict[str, int]]:
+    """최근 CL 을 샘플링해 확장자 화이트리스트에 없는 binary 파일을 찾는다.
+
+    auto_detect_binary 를 켜지 않으면 git 본문에 박힐 위험이 있는 파일들의 증거
+    (예시 경로, 확장자별 빈도)를 반환한다. P4 호출 실패 시 빈 결과.
+    """
+    from p4gitsync.lfs.lfs_routing import P4TypeClass, classify_p4_file_type
+
+    examples: list[str] = []
+    ext_counter: dict[str, int] = {}
+
+    try:
+        from p4gitsync.config.sync_config import P4Config
+
+        cfg = P4Config(
+            port=p4_config.get("port", ""),
+            user=p4_config.get("user", ""),
+            password=p4_config.get("password", ""),
+            stream=p4_config.get("stream", ""),
+        )
+        client = cfg.create_client()
+        client.connect()
+        try:
+            stream = p4_config.get("stream", "")
+            if not stream:
+                return examples, ext_counter
+            changes = client._p4.run_changes(
+                "-s", "submitted", "-m", str(sample_cls), f"{stream}/...",
+            )
+            cl_nums = [c["change"] for c in changes]
+            for i in range(0, len(cl_nums), 50):
+                descs = client._p4.run_describe("-s", *cl_nums[i:i + 50])
+                for desc in descs:
+                    types = desc.get("type", [])
+                    files = desc.get("depotFile", [])
+                    for j, ft in enumerate(types):
+                        if classify_p4_file_type(ft) is not P4TypeClass.BINARY:
+                            continue
+                        if j >= len(files):
+                            continue
+                        path = files[j]
+                        ext = os.path.splitext(path)[1].lower()
+                        if ext in known_exts:
+                            continue
+                        key = ext or "(확장자 없음)"
+                        ext_counter[key] = ext_counter.get(key, 0) + 1
+                        if len(examples) < 10:
+                            examples.append(path)
+        finally:
+            client.disconnect()
+    except Exception as e:
+        print(f"  binary 스캔 실패: {e}")
+
+    return examples, ext_counter
+
+
 def _setup_lfs(
     existing: dict[str, Any] | None = None,
     p4_config: dict[str, Any] | None = None,
@@ -330,6 +390,44 @@ def _setup_lfs(
     ):
         if key in ex:
             result[key] = ex[key]
+
+    # 자동 binary 라우팅 제안 — 확장자만으로 잡히지 않는 대형 binary 대비
+    default_threshold = (
+        ex.get("binary_size_threshold_bytes")
+        or ex.get("size_threshold_bytes")
+        or 100 * 1024
+    )
+    auto_detect = ex.get("auto_detect_binary", False)
+    if p4_config:
+        print("\n  화이트리스트에 없는 binary 파일을 스캔하는 중...")
+        examples, ext_counter = _scan_unhandled_binaries(p4_config, set(merged))
+        if examples:
+            print(f"  확장자 화이트리스트에 없는 binary 파일 감지 (예시 {len(examples)}건):")
+            for path in examples[:5]:
+                print(f"    - {path}")
+            top_exts = sorted(ext_counter.items(), key=lambda kv: -kv[1])[:5]
+            if top_exts:
+                summary = ", ".join(f"{e}({n})" for e, n in top_exts)
+                print(f"  비-화이트리스트 binary 확장자: {summary}")
+            print(
+                "  → 확장자 규칙만으로는 이 파일들이 git 본문에 박혀 "
+                "history rewrite 없이 제거가 불가합니다."
+            )
+            auto_detect = _input_bool(
+                "  자동 binary 감지/라우팅(type+size)을 켤까요?", default=True
+            )
+        else:
+            print("  비-화이트리스트 binary 파일이 감지되지 않았습니다.")
+            auto_detect = _input_bool(
+                "  자동 binary 감지/라우팅을 켤까요?", default=auto_detect
+            )
+
+    result["auto_detect_binary"] = auto_detect
+    if auto_detect:
+        threshold = _input_int(
+            "  binary LFS 라우팅 크기 임계 (바이트)", default_threshold
+        )
+        result["binary_size_threshold_bytes"] = threshold
 
     return result
 

@@ -125,6 +125,14 @@ class InitialImportConfig:
     checkpoint_interval: int = 1000
     use_fast_import: bool = True
     replica_port: str = ""
+    # P4 서버 부하 throttle: 활성 명령 수가 임계 초과면 대기
+    server_load_threshold: int = 50
+    throttle_wait_seconds: int = 60
+    # 대형 CL 메모리 스트리밍 임계(이 이상이면 content 를 모으지 않고 chunk 추출+즉시 write)
+    streaming_file_threshold: int = 2000
+    streaming_bytes_threshold: int = 256 * 1024 * 1024
+    # >0 이면 N checkpoint 마다 git repack -ad 로 중간 통합(pack 파편화 완화). 0=비활성
+    repack_interval_checkpoints: int = 0
 
 
 @dataclass

@@ -34,6 +34,14 @@ resume_on_restart = true
 checkpoint_interval = 1000
 use_fast_import = true
 replica_port = ""
+# P4 서버 부하 throttle: 활성 명령 수가 임계 초과면 throttle_wait_seconds 만큼 대기
+server_load_threshold = 50
+throttle_wait_seconds = 60
+# 대형 CL 메모리 스트리밍 임계(이 이상이면 content 를 모으지 않고 chunk 추출+즉시 write)
+streaming_file_threshold = 2000
+streaming_bytes_threshold = 268435456   # 256 MiB
+# >0 이면 N checkpoint 마다 git repack -ad 로 중간 통합(pack 파편화/최종 gc 부담 완화). 0=비활성
+repack_interval_checkpoints = 0
 
 [logging]
 level = "INFO"
@@ -63,6 +71,11 @@ lockable_extensions = [".uasset", ".umap"]
 server_type = "builtin"
 server_url = ""
 size_threshold_bytes = 102400
+# 확장자 화이트리스트에 없어도 P4 file_type 이 binary 인 파일을 크기 임계로 LFS 라우팅.
+# 확장자 없는 빌드 산출물·.pak 등이 git 본문에 박히는 것을 막는다. 기본 false(확장자 전용).
+auto_detect_binary = false
+# auto_detect_binary=true 일 때 binary 라우팅 크기 임계(바이트). 미지정 시 size_threshold_bytes 사용.
+# binary_size_threshold_bytes = 102400
 
 [stream_policy]
 auto_discover = true

@@ -170,3 +170,54 @@ class TestP4ClientWithMock:
             {"status": "R"} for _ in range(60)
         ]
         assert client.check_server_load(50) is True
+
+    def test_fill_sizes(self, mock_p4):
+        client, mock = mock_p4
+        mock.run_sizes.return_value = [
+            {"depotFile": "//d/a", "fileSize": "100"},
+            {"depotFile": "//d/b", "fileSize": "5000"},
+        ]
+        a = P4FileAction("//d/a", "add", "binary", 1)
+        b = P4FileAction("//d/b", "add", "binary", 2)
+        client.fill_sizes([a, b])
+        assert a.size == 100
+        assert b.size == 5000
+
+    def test_fill_sizes_skips_already_filled(self, mock_p4):
+        client, mock = mock_p4
+        a = P4FileAction("//d/a", "add", "binary", 1, size=42)
+        client.fill_sizes([a])
+        mock.run_sizes.assert_not_called()
+        assert a.size == 42
+
+    def test_fill_sizes_batches(self, mock_p4):
+        client, mock = mock_p4
+        mock.run_sizes.return_value = []
+        actions = [P4FileAction(f"//d/f{i}", "add", "binary", 1) for i in range(5)]
+        client.fill_sizes(actions, batch_size=2)
+        assert mock.run_sizes.call_count == 3
+
+    def test_read_head_prefix_none_when_no_data(self, mock_p4):
+        client, mock = mock_p4
+        # mock run_print 는 handler 콜백을 호출하지 않음 → received False → None
+        assert client.read_head_prefix("//d/a", 1) is None
+
+
+class TestHeadPrefixHandler:
+    def test_accumulate_and_cancel(self):
+        from P4 import OutputHandler
+
+        from p4gitsync.p4.p4_client import _HeadPrefixHandler
+
+        h = _HeadPrefixHandler(4)
+        assert h.outputBinary(b"ab") == OutputHandler.HANDLED
+        assert h.received is True
+        assert h.outputBinary(b"cdef") == OutputHandler.CANCEL
+        assert bytes(h.buf[:4]) == b"abcd"
+
+    def test_text_encoded(self):
+        from p4gitsync.p4.p4_client import _HeadPrefixHandler
+
+        h = _HeadPrefixHandler(100)
+        h.outputText("hello")
+        assert bytes(h.buf) == b"hello"
