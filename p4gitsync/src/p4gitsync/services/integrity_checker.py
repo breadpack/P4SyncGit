@@ -9,9 +9,11 @@ import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 
 from p4gitsync.lfs.lfs_object_store import LfsObjectStore
 from p4gitsync.lfs.lfs_pointer_utils import is_lfs_pointer, parse_lfs_pointer
+from p4gitsync.lfs.lfs_routing import P4TypeClass, classify_p4_file_type
 from p4gitsync.p4.p4_client import P4Client
 from p4gitsync.services import integrity_compare as ic
 
@@ -153,6 +155,11 @@ class IntegrityChecker:
         - ``smart`` : 임계 이상 대형 파일은 **전수**(고위험·LFS), 나머지 코드 파일은
           무작위 N개 샘플. 대형 에셋 정합성을 보장하면서 시간을 통제.
         """
+        if mode not in {"full", "sample", "smart"}:
+            raise ValueError(
+                f"잘못된 verify_mode: {mode!r} (유효값: full, sample, smart)"
+            )
+
         git_files = self._list_git_files()
         if not git_files:
             return IntegrityResult(passed=True, checked_files=0, strategy=mode)
@@ -162,7 +169,6 @@ class IntegrityChecker:
         elif mode == "sample":
             targets = random.sample(git_files, min(sample_count, len(git_files)))
         else:
-            mode = "smart"
             targets = self._select_smart(git_files, sample_count, large_threshold_bytes)
 
         logger.info(
@@ -230,10 +236,19 @@ class IntegrityChecker:
             c.connect()
 
         results: list[tuple[int, list[str]]] = [(0, []) for _ in range(n)]
+        errors: list[tuple[int, BaseException]] = []
+        errors_lock = threading.Lock()
         threads: list[threading.Thread] = []
 
         def work(idx: int) -> None:
-            results[idx] = self._verify_slice(slices[idx], clients[idx])
+            try:
+                results[idx] = self._verify_slice(slices[idx], clients[idx])
+            except BaseException as e:  # noqa: BLE001 - fail-closed: 모든 예외 수집
+                logger.error(
+                    "병렬 검증 워커 %d 예외 — 검증 실패 처리: %s", idx, e, exc_info=True,
+                )
+                with errors_lock:
+                    errors.append((idx, e))
 
         try:
             for i in range(n):
@@ -248,6 +263,13 @@ class IntegrityChecker:
                     c.disconnect()
                 except Exception:
                     pass
+
+        # fail-closed: 워커가 하나라도 예외를 던졌으면 검증이 일부 누락된 것이므로
+        # 조용히 통과시키지 않고 실패로 처리한다.
+        if errors:
+            raise RuntimeError(
+                f"병렬 무결성 검증 중 {len(errors)}개 워커 예외 발생 — 검증 실패"
+            )
 
         checked = sum(c for c, _ in results)
         mismatched: list[str] = []
@@ -284,7 +306,7 @@ class IntegrityChecker:
         mismatched: list[str] = []
 
         # LFS: digest 를 한 번에 배치 조회(콘텐츠 전송 없음)
-        lfs_meta: dict[str, tuple[str, int]] = {}
+        lfs_meta: dict[str, tuple[str, int, str]] = {}
         if lfs_items:
             lfs_meta = p4.head_digests([depot for _, depot, _ in lfs_items])
 
@@ -311,7 +333,7 @@ class IntegrityChecker:
         return checked, mismatched
 
     def _verify_lfs(
-        self, git_path: str, depot: str, ptr, meta: tuple[str, int] | None, p4: P4Client,
+        self, git_path: str, depot: str, ptr, meta: tuple[str, int, str] | None, p4: P4Client,
     ) -> bool | None:
         """단일 LFS 파일 검증. True=불일치, False=일치, None=스킵."""
         object_exists = self._lfs_store.exists(ptr.oid) if self._lfs_store else None
@@ -321,7 +343,14 @@ class IntegrityChecker:
                 local_md5 = self._md5_file(self._lfs_store.object_path(ptr.oid))
             except OSError:
                 local_md5 = None
-        p4_md5, p4_size = (meta if meta else (None, None))
+        p4_md5, p4_size, p4_type = (meta if meta else (None, None, ""))
+
+        # P4 digest 는 text 타입 파일에 대해 줄바꿈 정규화된 MD5 라서, text 로
+        # 체크인된 파일이 확장자 규칙으로 LFS 라우팅된 경우 raw bytes MD5 와
+        # 불일치 오탐이 난다. binary 계열이 아니면 MD5 fast-path 를 쓰지 않고
+        # (p4_md5=None) 콘텐츠 SHA256 fallback(NEED_CONTENT)으로 보낸다.
+        if classify_p4_file_type(p4_type) is not P4TypeClass.BINARY:
+            p4_md5 = None
 
         status, reason = ic.decide_lfs(
             ptr_oid=ptr.oid, ptr_size=ptr.size,
@@ -343,7 +372,7 @@ class IntegrityChecker:
         self, ptr, depot: str, p4: P4Client,
     ) -> tuple[str | None, str]:
         """메타로 판정 불가 시 P4 콘텐츠를 스트리밍 해시해 pointer.oid 와 비교."""
-        tmp_dir = self._lfs_store.tmp_dir if self._lfs_store else self._repo_path
+        tmp_dir = self._lfs_store.tmp_dir if self._lfs_store else Path(self._repo_path)
         tmp_path = None
         try:
             tmp_path = p4.print_head_to_disk(depot, tmp_dir)

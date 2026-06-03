@@ -41,10 +41,11 @@ def _depot(git_path: str) -> str:
 class _FakeP4:
     """무결성 검증에 필요한 최소 P4 인터페이스."""
 
-    def __init__(self, contents=None, digests=None, sizes=None):
+    def __init__(self, contents=None, digests=None, sizes=None, fail_on=None):
         self._contents = contents or {}    # depot -> bytes (#head 콘텐츠)
-        self._digests = digests or {}      # depot -> (md5_lower, size)
+        self._digests = digests or {}      # depot -> (md5_lower, size, head_type)
         self._sizes = sizes or []          # list[(depot, size)]
+        self._fail_on = fail_on            # 호출 시 예외를 던질 메서드명(병렬 워커 테스트)
 
     def connect(self):
         pass
@@ -53,6 +54,8 @@ class _FakeP4:
         pass
 
     def print_file_to_bytes_head(self, depot):
+        if self._fail_on == "print_file_to_bytes_head":
+            raise RuntimeError("injected failure")
         return self._contents.get(depot)
 
     def head_digests(self, depot_paths, batch_size=200):
@@ -117,7 +120,7 @@ class TestLfsFiles:
         _make_repo(repo_dir, {"assets/tex.bin": ptr.pointer_bytes})
 
         md5 = hashlib.md5(content).hexdigest()
-        p4 = _FakeP4(digests={_depot("assets/tex.bin"): (md5, len(content))})
+        p4 = _FakeP4(digests={_depot("assets/tex.bin"): (md5, len(content), "binary")})
         checker = IntegrityChecker(p4, repo_dir, _STREAM, lfs_store=store)
         res = checker.verify_full()
         assert res.passed is True
@@ -129,7 +132,7 @@ class TestLfsFiles:
         _make_repo(repo_dir, {"a.bin": ptr.pointer_bytes})
         md5 = hashlib.md5(content).hexdigest()
         # P4 가 보고한 size 가 pointer 와 다름
-        p4 = _FakeP4(digests={_depot("a.bin"): (md5, 999)})
+        p4 = _FakeP4(digests={_depot("a.bin"): (md5, 999, "binary")})
         checker = IntegrityChecker(p4, repo_dir, _STREAM, lfs_store=store)
         res = checker.verify_full()
         assert res.passed is False
@@ -139,7 +142,7 @@ class TestLfsFiles:
         content = b"\x00" * 500
         store, ptr = _store_lfs_object(repo_dir, content)
         _make_repo(repo_dir, {"a.bin": ptr.pointer_bytes})
-        p4 = _FakeP4(digests={_depot("a.bin"): ("deadbeef" * 4, len(content))})
+        p4 = _FakeP4(digests={_depot("a.bin"): ("deadbeef" * 4, len(content), "binary")})
         checker = IntegrityChecker(p4, repo_dir, _STREAM, lfs_store=store)
         res = checker.verify_full()
         assert res.passed is False
@@ -151,7 +154,7 @@ class TestLfsFiles:
         # 로컬 object 삭제 → 마이그레이션 산출물 깨짐
         store.object_path(ptr.oid).unlink()
         md5 = hashlib.md5(content).hexdigest()
-        p4 = _FakeP4(digests={_depot("a.bin"): (md5, len(content))})
+        p4 = _FakeP4(digests={_depot("a.bin"): (md5, len(content), "binary")})
         checker = IntegrityChecker(p4, repo_dir, _STREAM, lfs_store=store)
         res = checker.verify_full()
         assert res.passed is False
@@ -168,6 +171,25 @@ class TestLfsFiles:
         assert res.passed is True
         assert res.checked_files == 1
 
+    def test_lfs_text_type_uses_content_fallback_not_md5(self, repo_dir):
+        # text 타입으로 체크인됐지만 확장자 규칙으로 LFS 라우팅된 파일.
+        # P4 digest 는 줄바꿈 정규화된 MD5 라서 raw bytes MD5 와 다르다 →
+        # MD5 fast-path 를 쓰면 오탐. binary 가 아니므로 콘텐츠 SHA256 fallback
+        # 으로 가야 하고, 콘텐츠가 일치하면 통과해야 한다.
+        content = b"line1\nline2\nline3\n"
+        store, ptr = _store_lfs_object(repo_dir, content)
+        _make_repo(repo_dir, {"data.csv": ptr.pointer_bytes})
+        # 일부러 틀린 MD5 를 넣어, fast-path 가 동작했다면 불일치가 났을 상황을 만든다.
+        wrong_md5 = "deadbeef" * 4
+        p4 = _FakeP4(
+            digests={_depot("data.csv"): (wrong_md5, len(content), "text")},
+            contents={_depot("data.csv"): content},
+        )
+        checker = IntegrityChecker(p4, repo_dir, _STREAM, lfs_store=store)
+        res = checker.verify_full()
+        assert res.passed is True
+        assert res.checked_files == 1
+
 
 class TestCutoverStrategies:
     def _setup_mixed(self, repo_dir):
@@ -180,7 +202,9 @@ class TestCutoverStrategies:
         _make_repo(repo_dir, files)
 
         # 대형 파일은 P4 digest 가 일부러 불일치
-        digests = {_depot("assets/huge.bin"): ("bad" * 10 + "0000", 8 * 1024 * 1024)}
+        digests = {
+            _depot("assets/huge.bin"): ("bad" * 10 + "0000", 8 * 1024 * 1024, "binary"),
+        }
         contents = {_depot(f"src/f{i}.txt"): f"code{i}".encode() for i in range(20)}
         sizes = [(_depot("assets/huge.bin"), 8 * 1024 * 1024)]
         sizes += [(_depot(f"src/f{i}.txt"), 5) for i in range(20)]
@@ -225,3 +249,35 @@ class TestParallelEqualsSerial:
 
         assert r_serial.checked_files == r_parallel.checked_files == 10
         assert set(r_serial.mismatched_files) == set(r_parallel.mismatched_files) == {"src/f3.txt"}
+
+    def test_parallel_worker_exception_raises_runtimeerror(self, repo_dir):
+        # fail-closed: 워커가 예외를 던지면 일부 슬라이스가 검증되지 않으므로
+        # 조용히 passed=True 가 되어선 안 되고 RuntimeError 로 실패해야 한다.
+        files = {f"src/f{i}.txt": f"v{i}".encode() for i in range(10)}
+        _make_repo(repo_dir, files)
+        contents = {_depot(f"src/f{i}.txt"): f"v{i}".encode() for i in range(10)}
+        p4 = _FakeP4(contents=contents, fail_on="print_file_to_bytes_head")
+        checker = IntegrityChecker(
+            p4, repo_dir, _STREAM, p4_config=_FakeP4Config(p4), max_workers=4,
+        )
+        with pytest.raises(RuntimeError):
+            checker.verify_full()
+
+
+class TestVerifyCutoverModeValidation:
+    def test_invalid_mode_raises_valueerror(self, repo_dir):
+        _make_repo(repo_dir, {"src/code.txt": b"hello"})
+        p4 = _FakeP4(contents={_depot("src/code.txt"): b"hello"})
+        checker = IntegrityChecker(p4, repo_dir, _STREAM)
+        with pytest.raises(ValueError):
+            checker.verify_cutover(mode="smrt")
+        with pytest.raises(ValueError):
+            checker.verify_cutover(mode="FULL")
+
+    def test_valid_modes_do_not_raise(self, repo_dir):
+        _make_repo(repo_dir, {"src/code.txt": b"hello"})
+        p4 = _FakeP4(contents={_depot("src/code.txt"): b"hello"})
+        checker = IntegrityChecker(p4, repo_dir, _STREAM)
+        for mode in ("full", "sample", "smart"):
+            res = checker.verify_cutover(mode=mode)
+            assert res.strategy == mode

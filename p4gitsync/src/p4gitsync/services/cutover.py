@@ -241,14 +241,13 @@ class CutoverManager:
         )
 
         # LFS object store (LFS 파일 무결성 교차검증용) — 활성 시에만
-        lfs_store = None
-        if self._config.lfs.enabled:
-            from pathlib import Path
+        from p4gitsync.lfs.lfs_store_factory import build_lfs_store
 
-            from p4gitsync.lfs.lfs_object_store import LfsObjectStore
-            repo_path = Path(self._config.git.repo_path)
-            git_dir = repo_path if self._config.git.bare else repo_path / ".git"
-            lfs_store = LfsObjectStore(git_dir=git_dir)
+        lfs_store = build_lfs_store(
+            self._config.git.repo_path,
+            bare=self._config.git.bare,
+            enabled=self._config.lfs.enabled,
+        )
 
         self._integrity_checker = IntegrityChecker(
             p4_client=self._p4_client,

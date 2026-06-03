@@ -120,7 +120,7 @@ class TestProvisionerApply:
     def test_push_ruleset_creates_when_absent(self):
         # GET rulesets → 빈 목록 → POST 로 생성
         client = _FakeClient(responses={
-            ("GET", "/repos/octo/repo/rulesets"): (200, []),
+            ("GET", "/repos/octo/repo/rulesets?per_page=100"): (200, []),
         })
         prov = GitHubProvisioner(client, "octo/repo")
         prov.apply(GitHubSpec(protected_branches=[]), dry_run=False)
@@ -130,7 +130,7 @@ class TestProvisionerApply:
     def test_push_ruleset_updates_when_present(self):
         # GET rulesets 에 동일 이름 존재 → PUT /rulesets/{id}
         client = _FakeClient(responses={
-            ("GET", "/repos/octo/repo/rulesets"): (
+            ("GET", "/repos/octo/repo/rulesets?per_page=100"): (
                 200, [{"id": 77, "name": "p4gitsync-large-file-guard"}],
             ),
         })
@@ -139,9 +139,22 @@ class TestProvisionerApply:
         methods = [(m, p) for m, p, _ in client.calls]
         assert ("PUT", "/repos/octo/repo/rulesets/77") in methods
 
+    def test_ruleset_list_requests_per_page_100(self):
+        # 멱등 upsert: ruleset 조회는 per_page=100 으로 한 페이지에 최대한 담아
+        # 기존 항목이 페이지네이션으로 누락돼 중복 생성되는 것을 막는다.
+        client = _FakeClient(responses={
+            ("GET", "/repos/octo/repo/rulesets?per_page=100"): (200, []),
+        })
+        prov = GitHubProvisioner(client, "octo/repo")
+        prov.apply(GitHubSpec(protected_branches=["main"]), dry_run=False)
+        get_paths = [p for m, p, _ in client.calls if m == "GET"]
+        assert get_paths  # ruleset 조회가 실제로 발생
+        assert all("per_page=100" in p for p in get_paths)
+        assert all(p == "/repos/octo/repo/rulesets?per_page=100" for p in get_paths)
+
     def test_branch_protect_creates_ruleset(self):
         client = _FakeClient(responses={
-            ("GET", "/repos/octo/repo/rulesets"): (200, []),
+            ("GET", "/repos/octo/repo/rulesets?per_page=100"): (200, []),
         })
         prov = GitHubProvisioner(client, "octo/repo")
         results = prov.apply(GitHubSpec(protected_branches=["main"]), dry_run=False)

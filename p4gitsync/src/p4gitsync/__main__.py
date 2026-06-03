@@ -1,13 +1,53 @@
 import argparse
 import logging
-import signal
 import sys
 import tomllib
 from pathlib import Path
 
+from p4gitsync.cli.commands_inspect import _run_preview, _run_tree
+from p4gitsync.cli.commands_migrate import (
+    _run_cutover,
+    _run_import,
+    _run_lfs_push,
+    _run_preflight,
+    _run_rebuild_state,
+    _run_reinit_git,
+    _run_resync,
+)
+from p4gitsync.cli.commands_provision import (
+    _run_bundle,
+    _run_provision,
+    _run_provision_github,
+    _run_provision_gitlab,
+    _run_tune_repo,
+)
+from p4gitsync.cli.commands_run import _run_service, _run_sync
 from p4gitsync.config.logging_config import setup_logging
 from p4gitsync.config.sync_config import AppConfig, apply_env_overrides
-from p4gitsync.services.sync_orchestrator import SyncOrchestrator
+
+# 하위호환: 핸들러는 cli/commands_*.py 로 분리됨. 위 import 는 기존
+# `from p4gitsync.__main__ import _run_bundle` 류 호출 경로를 유지한다.
+__all__ = [
+    "load_config",
+    "main",
+    "_build_parser",
+    "_run_sync",
+    "_run_service",
+    "_run_import",
+    "_run_resync",
+    "_run_rebuild_state",
+    "_run_reinit_git",
+    "_run_cutover",
+    "_run_preflight",
+    "_run_lfs_push",
+    "_run_tree",
+    "_run_preview",
+    "_run_provision",
+    "_run_provision_gitlab",
+    "_run_provision_github",
+    "_run_tune_repo",
+    "_run_bundle",
+]
 
 logger = logging.getLogger("p4gitsync")
 
@@ -216,545 +256,6 @@ def _build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument("--name", help="특정 서비스만 조회")
 
     return parser
-
-
-def _run_sync(config: AppConfig) -> None:
-    with SyncOrchestrator(config) as orchestrator:
-        if config.api.enabled:
-            from p4gitsync.api.api_server import ApiServer
-
-            api_server = ApiServer(
-                host=config.api.host,
-                port=config.api.port,
-                trigger_secret=config.api.trigger_secret,
-                redis_config=config.redis if config.redis.enabled else None,
-                state_store=orchestrator.state_store,
-                event_consumer=orchestrator.event_consumer,
-                circuit_breaker=orchestrator.circuit_breaker,
-            )
-            api_server.start_in_thread()
-
-        def _signal_handler(signum: int, frame: object) -> None:
-            orchestrator.stop()
-
-        signal.signal(signal.SIGINT, _signal_handler)
-        signal.signal(signal.SIGTERM, _signal_handler)
-
-        orchestrator.start()
-
-
-def _build_lfs_store(config: AppConfig):
-    """config 기반 LfsObjectStore 생성(LFS 비활성 시 None). orchestrator 와 동일 규약."""
-    if not config.lfs.enabled:
-        return None
-    from p4gitsync.lfs.lfs_object_store import LfsObjectStore
-    repo_path = Path(config.git.repo_path)
-    git_dir = repo_path if config.git.bare else repo_path / ".git"
-    return LfsObjectStore(git_dir=git_dir)
-
-
-def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None = None) -> None:
-    from p4gitsync.git.pack_tuning import ensure_repo_tuned
-    from p4gitsync.state.state_store import StateStore
-
-    # 대용량 pack 튜닝을 import 전에 주입 → 이후 checkpoint repack·최종 gc 가 적용받음
-    ensure_repo_tuned(config.git.repo_path, config.pack_tuning, bare=config.git.bare)
-
-    state_store = StateStore(config.state.db_path)
-    state_store.initialize()
-
-    # LFS object store (활성 시) — import 가 LFS 포인터/객체를 생성하고 tmp 를 정리하도록
-    lfs_store = _build_lfs_store(config)
-
-    p4_client = config.p4.create_client()
-    p4_client.connect()
-
-    try:
-        if streams:
-            # 다중 stream import (branch 관계 보존)
-            from p4gitsync.services.multi_stream_importer import MultiStreamImporter
-            from p4gitsync.services.user_mapper import UserMapper
-
-            user_mapper = UserMapper(config=config.user_mapping, state_store=state_store)
-            importer = MultiStreamImporter(
-                p4_client=p4_client,
-                state_store=state_store,
-                repo_path=config.git.repo_path,
-                config=config.initial_import,
-                lfs_config=config.lfs if config.lfs.enabled else None,
-                lfs_store=lfs_store,
-                user_mapper=user_mapper,
-            )
-            importer.run(streams, config.git.default_branch)
-        else:
-            # 단일 stream import (기존 동작)
-            from p4gitsync.services.initial_importer import InitialImporter
-
-            p4_stream = stream or config.p4.stream
-            importer = InitialImporter(
-                p4_client=p4_client,
-                state_store=state_store,
-                repo_path=config.git.repo_path,
-                stream=p4_stream,
-                config=config.initial_import,
-                lfs_config=config.lfs if config.lfs.enabled else None,
-                lfs_store=lfs_store,
-            )
-            importer.run(config.git.default_branch)
-    finally:
-        p4_client.disconnect()
-        state_store.close()
-
-
-def _run_rebuild_state(config: AppConfig) -> None:
-    from p4gitsync.services.recovery import rebuild_state_from_git, _create_git_operator
-
-    git_operator = _create_git_operator(config)
-    git_operator.init_repo()
-
-    count = rebuild_state_from_git(config, git_operator)
-    print(f"State DB 재구성 완료: {count} commits 복구")
-
-
-def _run_resync(config: AppConfig, from_cl: int, to_cl: int, stream: str | None) -> None:
-    from p4gitsync.services.recovery import resync_range
-
-    p4_stream = stream or config.p4.stream
-    count = resync_range(config, from_cl, to_cl, p4_stream)
-    print(f"재동기화 완료: {count} CLs (CL {from_cl} ~ {to_cl})")
-
-
-def _run_reinit_git(config: AppConfig, remote: str) -> None:
-    from p4gitsync.services.recovery import reinit_git
-
-    reinit_git(config, remote)
-    print(f"Git 리포지토리 재초기화 완료 (from {remote})")
-
-
-def _run_cutover(config: AppConfig, dry_run: bool) -> None:
-    from p4gitsync.services.cutover import CutoverManager
-
-    manager = CutoverManager(config)
-
-    if dry_run:
-        result = manager.dry_run()
-    else:
-        result = manager.execute()
-
-    print(f"\n{'=' * 50}")
-    print(f"결과: {result.message}")
-    print(f"Phase: {result.phase.value}")
-    for detail in result.details:
-        print(f"  - {detail}")
-    print(f"{'=' * 50}")
-
-    if not result.success:
-        sys.exit(1)
-
-
-def _run_tree(config: AppConfig, depot: str | None, include_deleted: bool, include_virtual: bool = False) -> None:
-    from p4gitsync.services.stream_tree_viewer import StreamTreeViewer
-
-    # depot 추출
-    if depot:
-        p4_depot = depot
-    else:
-        stream = config.p4.stream
-        parts = stream.rstrip("/").split("/")
-        p4_depot = "/".join(parts[:3])  # //depot
-
-    p4_client = config.p4.create_client()
-    p4_client.connect()
-
-    try:
-        viewer = StreamTreeViewer(p4_client)
-        roots = viewer.build_tree(
-            p4_depot,
-            default_branch=config.git.default_branch,
-            include_deleted=include_deleted,
-            include_virtual=include_virtual,
-        )
-
-        if not roots:
-            print(f"Stream을 찾을 수 없습니다: {p4_depot}")
-            return
-
-        print(f"\nP4 Stream Tree: {p4_depot}")
-        print("=" * 60)
-        print(viewer.format_tree(roots))
-        print(viewer.format_summary(roots))
-    finally:
-        p4_client.disconnect()
-
-
-def _run_preview(
-    config: AppConfig,
-    depot: str | None,
-    output: str,
-    no_merge_scan: bool,
-    merge_scan_limit: int,
-) -> None:
-    from p4gitsync.services.import_preview import ImportPreview
-
-    if depot:
-        p4_depot = depot
-    else:
-        stream = config.p4.stream
-        parts = stream.rstrip("/").split("/")
-        p4_depot = "/".join(parts[:3])
-
-    p4_client = config.p4.create_client()
-    p4_client.connect()
-
-    try:
-        preview = ImportPreview(p4_client)
-
-        scan_merges = not no_merge_scan
-        if scan_merges:
-            print("merge 스캔 중... (시간이 걸릴 수 있습니다)")
-            if merge_scan_limit:
-                print(f"  stream당 최근 {merge_scan_limit} CL만 스캔")
-
-        summaries, events = preview.build_preview(
-            p4_depot,
-            default_branch=config.git.default_branch,
-            scan_merges=scan_merges,
-            merge_scan_limit=merge_scan_limit,
-        )
-
-        report = preview.format_report(summaries, events)
-        with open(output, "w", encoding="utf-8") as f:
-            f.write(report)
-
-        # HTML 시각화 파일 생성
-        base_name = output.rsplit(".", 1)[0]
-        html_output = base_name + ".html"
-        graph_output = base_name + "-graph.html"
-
-        html_report = preview.format_html(
-            summaries, events,
-            depot=p4_depot,
-            server=f"{config.p4.user}@{config.p4.port}",
-        )
-        with open(html_output, "w", encoding="utf-8") as f:
-            f.write(html_report)
-
-        graph_report = preview.format_git_graph_html(
-            summaries, events,
-            depot=p4_depot,
-            server=f"{config.p4.user}@{config.p4.port}",
-        )
-        with open(graph_output, "w", encoding="utf-8") as f:
-            f.write(graph_report)
-
-        print("\n미리보기 문서 생성 완료:")
-        print(f"  마크다운:   {output}")
-        print(f"  다이어그램: {html_output}")
-        print(f"  커밋 그래프: {graph_output}")
-
-        # 간략 요약 출력
-        total_cls = sum(s.total_cls for s in summaries)
-        merges = sum(1 for e in events if e.event_type == "merge")
-        cps = sum(1 for e in events if e.event_type == "cherry_pick")
-        branch_points = sum(1 for e in events if e.event_type == "branch_point")
-        print(f"  Branch: {len(summaries)}개")
-        print(f"  총 CL: {total_cls:,}개")
-        print(f"  분기점: {branch_points}개")
-        print(f"  Merge: {merges}개")
-        print(f"  Cherry-pick: {cps}개")
-    finally:
-        p4_client.disconnect()
-
-
-def _run_preflight(
-    config: AppConfig,
-    stream: str | None,
-    top_dirs: list[str] | None,
-    large_threshold_mb: float,
-    output: str | None,
-) -> None:
-    from p4gitsync.services.preflight import PreflightChecker
-
-    p4_stream = stream or config.p4.stream
-    threshold = int(large_threshold_mb * 1024 * 1024)
-
-    p4_client = config.p4.create_client()
-    p4_client.connect()
-    try:
-        checker = PreflightChecker(
-            p4_client,
-            lfs_config=config.lfs if config.lfs.enabled else None,
-        )
-        report = checker.run(
-            p4_stream,
-            top_dirs=top_dirs,
-            large_threshold=threshold,
-            repo_path=config.git.repo_path or None,
-        )
-    finally:
-        p4_client.disconnect()
-
-    text = report.format_report()
-    print(text)
-    if output:
-        with open(output, "w", encoding="utf-8") as f:
-            f.write(text + "\n")
-        print(f"\n리포트 저장: {output}")
-
-    if report.has_blockers:
-        sys.exit(1)
-
-
-def _run_lfs_push(config: AppConfig, args) -> None:
-    import os
-
-    from p4gitsync.services.lfs_pusher import LfsPusher, LfsPushProgress
-
-    repo = config.git.repo_path
-    progress_path = args.progress_file or os.path.join(repo, ".lfs-push-progress.json")
-    progress = LfsPushProgress(progress_path)
-    pusher = LfsPusher(repo, remote=args.remote, progress=progress)
-
-    if args.reset_progress:
-        pusher.reset_progress()
-        print("진행 상태 초기화됨")
-
-    summary = pusher.run(
-        batch_size=args.batch_size,
-        continue_on_error=args.continue_on_error,
-    )
-    print(f"LFS push 결과: {summary}")
-    if not summary.ok:
-        print(f"  실패 OID {len(summary.failed_oids)}건 — 재실행하면 완료분은 건너뛰고 이어서 진행됩니다.")
-        sys.exit(1)
-
-
-def _run_provision_gitlab(args) -> None:
-    import os
-
-    from p4gitsync.services.gitlab_provisioner import (
-        GitLabClient,
-        GitLabProvisioner,
-        ProvisionSpec,
-    )
-
-    url = args.gitlab_url or os.environ.get("P4GITSYNC_GITLAB_URL")
-    project = args.project or os.environ.get("P4GITSYNC_GITLAB_PROJECT")
-    token = (
-        args.token
-        or os.environ.get("GITLAB_TOKEN")
-        or os.environ.get("P4GITSYNC_GITLAB_TOKEN")
-    )
-
-    if not url or not project:
-        print("--gitlab-url 과 --project (또는 P4GITSYNC_GITLAB_URL/PROJECT) 가 필요합니다.", file=sys.stderr)
-        sys.exit(2)
-    if not token and not args.dry_run:
-        print("GitLab 토큰이 필요합니다 (env GITLAB_TOKEN 또는 --token). --dry-run 은 토큰 없이 가능.", file=sys.stderr)
-        sys.exit(2)
-
-    spec = ProvisionSpec(
-        max_file_size_mb=args.max_file_size_mb,
-        lfs_enabled=not args.no_lfs,
-        merge_trains=args.merge_train,
-        protected_branches=args.protect,
-    )
-    client = GitLabClient(url, token or "")
-    provisioner = GitLabProvisioner(client, project)
-    results = provisioner.apply(spec, dry_run=args.dry_run)
-
-    print(f"GitLab 프로비저닝: {project} ({'DRY-RUN' if args.dry_run else url})")
-    failed = 0
-    for r in results:
-        mark = "[OK]" if r.ok else "[FAIL]"
-        if not r.ok:
-            failed += 1
-        print(f"  {mark} [{r.action}] {r.detail}")
-    if failed and not args.dry_run:
-        sys.exit(1)
-
-
-def _run_provision_github(args) -> None:
-    import os
-
-    from p4gitsync.services.github_provisioner import (
-        GitHubClient,
-        GitHubProvisioner,
-        GitHubSpec,
-    )
-
-    repository = args.repo or os.environ.get("P4GITSYNC_GITHUB_REPO")
-    api_url = (
-        args.api_url
-        or os.environ.get("P4GITSYNC_GITHUB_API_URL")
-        or "https://api.github.com"
-    )
-    token = (
-        args.token
-        or os.environ.get("GITHUB_TOKEN")
-        or os.environ.get("P4GITSYNC_GITHUB_TOKEN")
-    )
-
-    if not repository or "/" not in repository:
-        print("--repo owner/repo (또는 env P4GITSYNC_GITHUB_REPO) 가 필요합니다.", file=sys.stderr)
-        sys.exit(2)
-    if not token and not args.dry_run:
-        print("GitHub 토큰이 필요합니다 (env GITHUB_TOKEN 또는 --token). --dry-run 은 토큰 없이 가능.", file=sys.stderr)
-        sys.exit(2)
-
-    spec = GitHubSpec(
-        max_file_size_mb=args.max_file_size_mb,
-        protected_branches=args.protect,
-        require_pull_request=not args.no_require_pr,
-        required_approving_review_count=args.required_approvals,
-        require_status_checks=bool(args.status_check),
-        status_check_contexts=args.status_check,
-        merge_queue=args.merge_queue,
-        merge_method=args.merge_method,
-        enforcement=args.enforcement,
-    )
-    client = GitHubClient(token or "", base_url=api_url)
-    provisioner = GitHubProvisioner(client, repository)
-    results = provisioner.apply(spec, dry_run=args.dry_run)
-
-    print(f"GitHub 프로비저닝: {repository} ({'DRY-RUN' if args.dry_run else api_url})")
-    failed = 0
-    for r in results:
-        mark = "[OK]" if r.ok else "[FAIL]"
-        if not r.ok:
-            failed += 1
-        print(f"  {mark} [{r.action}] {r.detail}")
-    if failed and not args.dry_run:
-        sys.exit(1)
-
-
-def _run_tune_repo(config: AppConfig, dry_run: bool) -> None:
-    from p4gitsync.git.pack_tuning import (
-        apply_to_repo,
-        build_pack_config,
-        render_gitconfig,
-    )
-
-    settings = build_pack_config(config.pack_tuning)
-    if not settings:
-        print("pack_tuning.enabled=false — 적용할 설정이 없습니다.")
-        return
-
-    repo = config.git.repo_path
-    if dry_run:
-        print(f"[DRY-RUN] {repo} 에 적용할 pack 튜닝:\n")
-        print(render_gitconfig(settings))
-        return
-
-    applied = apply_to_repo(repo, settings)
-    print(f"pack 튜닝 적용 완료: {len(applied)}/{len(settings)}개 설정 ({repo})")
-    for key, value in applied:
-        print(f"  - {key} = {value}")
-
-
-def _run_bundle(config: AppConfig, args) -> None:
-    import os
-    import subprocess
-
-    repo = config.git.repo_path
-    output = os.path.abspath(args.output)
-    refs = ["--all"] if args.all else [config.git.default_branch]
-    result = subprocess.run(
-        ["git", "bundle", "create", output, *refs],
-        cwd=repo, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        print(f"git bundle 생성 실패: {result.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-
-    size = os.path.getsize(output) if os.path.exists(output) else 0
-    scope = "all refs" if args.all else config.git.default_branch
-    print(f"번들 생성 완료: {output} ({size:,} bytes, refs={scope})")
-    print(
-        "배포: 이 번들을 CDN/오브젝트 스토리지에 업로드 후, clone 시 "
-        "`git clone --bundle-uri=<URL>` 또는 bootstrap 의 BUNDLE_URI 환경변수로 사용하세요."
-    )
-
-
-def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> None:
-    import dataclasses
-
-    from p4gitsync.services import provisioner
-
-    out_dir = Path(output)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    max_bytes = int(max_file_size_mb * 1024 * 1024)
-    remote = config.git.remote_url or "git@gitlab.example.com:org/repo.git"
-    branch = config.git.default_branch
-
-    from p4gitsync.git.pack_tuning import build_pack_config, render_gitconfig
-
-    artifacts: dict[str, str] = {
-        "bootstrap-clone.sh": provisioner.generate_bootstrap_sh(remote, branch),
-        "bootstrap-clone.ps1": provisioner.generate_bootstrap_ps1(remote, branch),
-        "pre-receive": provisioner.generate_pre_receive_hook(max_bytes),
-        "recommended.gitconfig": provisioner.generate_gitconfig_snippet(),
-        "GITLAB-SETUP.md": provisioner.generate_gitlab_checklist(max_bytes),
-    }
-    # 대용량 repo pack/gc 튜닝(서버/호스트 repo 적용용). `tune-repo` 가 동일 설정을 주입.
-    pack_settings = build_pack_config(config.pack_tuning)
-    if pack_settings:
-        artifacts["recommended-repo.gitconfig"] = (
-            "# p4gitsync provision — 대용량 repo pack/gc 튜닝\n"
-            "# 적용: 대상 repo 에서 `p4gitsync tune-repo`, 또는 아래를 .git/config 에 병합.\n"
-            + render_gitconfig(pack_settings)
-        )
-    # LFS 사용 시 하드닝된 .gitattributes도 함께 제공
-    if config.lfs.enabled:
-        hardened = dataclasses.replace(config.lfs, text_normalization=True)
-        artifacts[".gitattributes"] = hardened.generate_gitattributes()
-
-    for name, content in artifacts.items():
-        (out_dir / name).write_text(content, encoding="utf-8", newline="\n")
-
-    # 실행 권한 (POSIX)
-    for name in ("bootstrap-clone.sh", "pre-receive"):
-        try:
-            path = out_dir / name
-            path.chmod(path.stat().st_mode | 0o111)
-        except OSError:
-            pass
-
-    print(f"권장 설정 생성 완료: {out_dir.resolve()}")
-    for name in artifacts:
-        print(f"  - {name}")
-    print("\n다음: bootstrap-clone 으로 개발자 clone, pre-receive·GITLAB-SETUP.md 로 서버 게이트 설정")
-
-
-def _run_service(args) -> None:
-    from pathlib import Path
-
-    from p4gitsync.cli.service_manager import create_service_manager
-
-    manager = create_service_manager()
-    subcmd = args.service_command
-    name = getattr(args, "name", "p4gitsync")
-
-    if subcmd == "install":
-        if getattr(sys, "frozen", False):
-            exe_path = sys.executable
-        else:
-            exe_path = f"{sys.executable} -m p4gitsync"
-        config_path = str(Path(args.config).resolve())
-        manager.install(name, exe_path, config_path)
-        print(f"서비스 '{name}' 등록 완료.")
-        print(f"시작: p4gitsync service start --name {name}")
-    elif subcmd == "start":
-        manager.start(name)
-        print(f"서비스 '{name}' 시작됨.")
-    elif subcmd == "stop":
-        manager.stop(name)
-        print(f"서비스 '{name}' 중지됨.")
-    elif subcmd == "uninstall":
-        manager.uninstall(name)
-        print(f"서비스 '{name}' 제거됨.")
-    else:
-        print("사용법: p4gitsync service {install|start|stop|uninstall}")
 
 
 def main() -> None:

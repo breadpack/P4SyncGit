@@ -367,13 +367,16 @@ class P4Client:
     @_auto_reconnect
     def head_digests(
         self, depot_paths: list[str], batch_size: int = 200,
-    ) -> dict[str, tuple[str, int]]:
-        """head 리비전의 (MD5 digest, size) 를 {depot_path: (md5_lower, size)} 로 반환.
+    ) -> dict[str, tuple[str, int, str]]:
+        """head 리비전 메타를 {depot_path: (md5_lower, size, head_type)} 로 반환.
 
         `p4 fstat -Ol` 로 콘텐츠 전송 없이 메타데이터만 받는다(무결성 교차검증용).
+        ``headType`` 도 함께 조회한다 — P4 digest 는 text 타입에 대해 줄바꿈
+        정규화된 MD5 라서, caller 가 타입에 따라 MD5 fast-path 사용 여부를
+        판단해야 한다.
         delete 리비전 및 digest/size 누락 항목은 제외한다.
         """
-        out: dict[str, tuple[str, int]] = {}
+        out: dict[str, tuple[str, int, str]] = {}
         if not depot_paths:
             return out
         specs = [f"{p}#head" for p in depot_paths]
@@ -381,7 +384,7 @@ class P4Client:
             chunk = specs[i:i + batch_size]
             try:
                 results = self._p4.run_fstat(
-                    "-Ol", "-T", "depotFile,digest,fileSize,headAction", *chunk,
+                    "-Ol", "-T", "depotFile,digest,fileSize,headType,headAction", *chunk,
                 )
             except P4Exception as e:
                 logger.warning("p4 fstat digest 배치 실패(스킵): %s", e)
@@ -396,7 +399,8 @@ class P4Client:
                 size = d.get("fileSize")
                 if digest is None or size is None:
                     continue
-                out[depot] = (str(digest).lower(), int(size))
+                head_type = str(d.get("headType") or "")
+                out[depot] = (str(digest).lower(), int(size), head_type)
         return out
 
     @_auto_reconnect

@@ -54,6 +54,24 @@ class TestDecideLfs:
         )
         assert status == ic.NEED_CONTENT
 
+    def test_need_content_when_md5_suppressed_but_size_ok(self):
+        # text 타입 처리: caller 가 p4_md5=None 으로 fast-path 를 끄고 size 만 넘긴다.
+        # size 가 맞으면 MD5 판정을 건너뛰고 NEED_CONTENT(콘텐츠 fallback)를 반환.
+        status, _ = ic.decide_lfs(
+            ptr_oid="o" * 64, ptr_size=10, object_exists=True,
+            p4_size=10, p4_md5=None, local_md5="abcdef",
+        )
+        assert status == ic.NEED_CONTENT
+
+    def test_size_mismatch_still_caught_when_md5_suppressed(self):
+        # p4_md5=None 이어도 size 불일치는 여전히 잡혀야 한다(콘텐츠 fallback 전 차단).
+        status, reason = ic.decide_lfs(
+            ptr_oid="o" * 64, ptr_size=10, object_exists=True,
+            p4_size=20, p4_md5=None, local_md5="abcdef",
+        )
+        assert status == ic.MISMATCH
+        assert "크기" in reason
+
 
 class TestDecideLfsContent:
     def test_match(self):

@@ -4,7 +4,7 @@ P4 서버 연결이 필요한 테스트는 mock을 사용한다.
 실제 P4 서버 테스트는 integration/ 디렉토리에서 수행한다.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -196,6 +196,46 @@ class TestP4ClientWithMock:
         actions = [P4FileAction(f"//d/f{i}", "add", "binary", 1) for i in range(5)]
         client.fill_sizes(actions, batch_size=2)
         assert mock.run_sizes.call_count == 3
+
+    def test_head_digests_returns_md5_size_type(self, mock_p4):
+        client, mock = mock_p4
+        mock.run_fstat.return_value = [
+            {
+                "depotFile": "//test/main/a.bin",
+                "digest": "ABCDEF0123456789ABCDEF0123456789",
+                "fileSize": "1234",
+                "headType": "binary+l",
+                "headAction": "edit",
+            },
+            {
+                "depotFile": "//test/main/b.txt",
+                "digest": "0011223344556677",
+                "fileSize": "10",
+                "headType": "text",
+                "headAction": "add",
+            },
+        ]
+        out = client.head_digests(["//test/main/a.bin", "//test/main/b.txt"])
+        assert out["//test/main/a.bin"] == (
+            "abcdef0123456789abcdef0123456789", 1234, "binary+l",
+        )
+        assert out["//test/main/b.txt"] == ("0011223344556677", 10, "text")
+        # headType 이 -T 필드에 포함됐는지 확인
+        args = mock.run_fstat.call_args[0]
+        assert any("headType" in a for a in args if isinstance(a, str))
+
+    def test_head_digests_skips_delete_and_missing(self, mock_p4):
+        client, mock = mock_p4
+        mock.run_fstat.return_value = [
+            {"depotFile": "//d/del", "headType": "binary",
+             "headAction": "delete", "digest": "x", "fileSize": "1"},
+            {"depotFile": "//d/nodig", "headType": "binary",
+             "headAction": "edit", "fileSize": "1"},
+            {"depotFile": "//d/ok", "headType": "binary",
+             "headAction": "edit", "digest": "AB", "fileSize": "5"},
+        ]
+        out = client.head_digests(["//d/del", "//d/nodig", "//d/ok"])
+        assert out == {"//d/ok": ("ab", 5, "binary")}
 
     def test_read_head_prefix_none_when_no_data(self, mock_p4):
         client, mock = mock_p4

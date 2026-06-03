@@ -232,8 +232,19 @@ class GitHubProvisioner:
         return results
 
     def _find_ruleset_id(self, name: str) -> int | None:
-        """이름이 일치하는 기존 ruleset id(멱등 upsert용)."""
-        status, data = self._c.request("GET", self._repo_base() + "/rulesets")
+        """이름이 일치하는 기존 ruleset id(멱등 upsert용).
+
+        ``per_page=100`` 으로 한 페이지에 최대한 담는다. 기본 per_page=30 으로
+        조회하면 ruleset 이 많을 때 기존 항목이 2페이지 이후로 밀려 못 찾고
+        매번 새로 POST → 중복 ruleset 이 생겨 멱등 upsert 가 깨진다.
+
+        한계: ruleset 이 100개를 초과하는 환경은 여전히 첫 페이지만 보므로
+        놓칠 수 있다. 완전한 처리는 응답 Link 헤더 기반 다음 페이지 순회가
+        필요하나, 현재 GitHubClient.request 가 헤더를 노출하지 않아(과한 변경)
+        실용적으로 per_page=100 로 제한한다(현실적 ruleset 수는 100 미만).
+        """
+        path = self._repo_base() + "/rulesets?per_page=100"
+        status, data = self._c.request("GET", path)
         if status == 200 and isinstance(data, list):
             for rs in data:
                 if isinstance(rs, dict) and rs.get("name") == name:
