@@ -43,6 +43,28 @@ streaming_bytes_threshold = 268435456   # 256 MiB
 # >0 이면 N checkpoint 마다 git repack -ad 로 중간 통합(pack 파편화/최종 gc 부담 완화). 0=비활성
 repack_interval_checkpoints = 0
 
+# 대용량 repo git pack/gc 저수준 튜닝. import 시작 시 repo 에 주입 → 이후 repack/gc 가 적용받음.
+# `p4gitsync tune-repo` 로 기존 repo 에 수동 적용도 가능.
+[pack_tuning]
+enabled = true
+big_file_threshold = "512m"      # 이 이상 blob 은 delta 시도 안 함(시간/메모리 절감)
+pack_size_limit = "2g"           # 단일 packfile 상한(전송/호스팅 제약 + 분할)
+window = 10                      # delta 탐색 윈도우
+depth = 50                       # delta 체인 깊이
+threads = 0                      # gc/repack 스레드 (0=코어 수 자동)
+window_memory = "1g"             # 스레드당 윈도우 메모리 상한(대형 gc OOM 방지)
+write_bitmaps = true             # bitmap 인덱스(clone/fetch 서빙 가속)
+write_bitmap_hash_cache = true
+commit_graph = true              # commit-graph 사용 + gc/fetch 시 갱신
+index_version = 4                # 인덱스 v4(많은 파일에서 작고 빠름)
+
+# P4→Git 컷오버 최종 무결성 검증 전략(대형 depot 의 freeze 윈도우 통제).
+[cutover]
+verify_mode = "smart"            # full(전수) | sample(무작위 N) | smart(대형 전수 + 나머지 샘플)
+verify_sample_count = 1000       # sample/smart 모드의 코드 파일 샘플 수
+verify_workers = 4               # 다중 P4 연결 병렬 검증 워커 수
+verify_large_threshold_bytes = 5242880   # 5 MiB — 이 이상은 smart 모드에서 전수 검증
+
 [logging]
 level = "INFO"
 format = "json"

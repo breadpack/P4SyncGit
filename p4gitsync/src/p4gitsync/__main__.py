@@ -176,6 +176,14 @@ def _build_parser() -> argparse.ArgumentParser:
     gh_parser.add_argument("--enforcement", choices=["active", "evaluate", "disabled"], default="active", help="ruleset 적용 모드 (기본: active)")
     gh_parser.add_argument("--dry-run", action="store_true", help="실제 호출 없이 적용 계획만 출력")
 
+    tune_parser = subparsers.add_parser(
+        "tune-repo",
+        help="대용량 repo git pack/gc 튜닝을 현재 repo 에 적용 (config [pack_tuning])",
+    )
+    tune_parser.add_argument(
+        "--dry-run", action="store_true", help="적용할 설정만 출력(실제 변경 없음)",
+    )
+
     subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
 
     service_parser = subparsers.add_parser("service", help="서비스 관리")
@@ -225,7 +233,11 @@ def _run_sync(config: AppConfig) -> None:
 
 
 def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None = None) -> None:
+    from p4gitsync.git.pack_tuning import ensure_repo_tuned
     from p4gitsync.state.state_store import StateStore
+
+    # 대용량 pack 튜닝을 import 전에 주입 → 이후 checkpoint repack·최종 gc 가 적용받음
+    ensure_repo_tuned(config.git.repo_path, config.pack_tuning, bare=config.git.bare)
 
     state_store = StateStore(config.state.db_path)
     state_store.initialize()
@@ -590,6 +602,30 @@ def _run_provision_github(args) -> None:
         sys.exit(1)
 
 
+def _run_tune_repo(config: AppConfig, dry_run: bool) -> None:
+    from p4gitsync.git.pack_tuning import (
+        apply_to_repo,
+        build_pack_config,
+        render_gitconfig,
+    )
+
+    settings = build_pack_config(config.pack_tuning)
+    if not settings:
+        print("pack_tuning.enabled=false — 적용할 설정이 없습니다.")
+        return
+
+    repo = config.git.repo_path
+    if dry_run:
+        print(f"[DRY-RUN] {repo} 에 적용할 pack 튜닝:\n")
+        print(render_gitconfig(settings))
+        return
+
+    applied = apply_to_repo(repo, settings)
+    print(f"pack 튜닝 적용 완료: {len(applied)}/{len(settings)}개 설정 ({repo})")
+    for key, value in applied:
+        print(f"  - {key} = {value}")
+
+
 def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> None:
     import dataclasses
 
@@ -601,6 +637,8 @@ def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> N
     remote = config.git.remote_url or "git@gitlab.example.com:org/repo.git"
     branch = config.git.default_branch
 
+    from p4gitsync.git.pack_tuning import build_pack_config, render_gitconfig
+
     artifacts: dict[str, str] = {
         "bootstrap-clone.sh": provisioner.generate_bootstrap_sh(remote, branch),
         "bootstrap-clone.ps1": provisioner.generate_bootstrap_ps1(remote, branch),
@@ -608,6 +646,14 @@ def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> N
         "recommended.gitconfig": provisioner.generate_gitconfig_snippet(),
         "GITLAB-SETUP.md": provisioner.generate_gitlab_checklist(max_bytes),
     }
+    # 대용량 repo pack/gc 튜닝(서버/호스트 repo 적용용). `tune-repo` 가 동일 설정을 주입.
+    pack_settings = build_pack_config(config.pack_tuning)
+    if pack_settings:
+        artifacts["recommended-repo.gitconfig"] = (
+            "# p4gitsync provision — 대용량 repo pack/gc 튜닝\n"
+            "# 적용: 대상 repo 에서 `p4gitsync tune-repo`, 또는 아래를 .git/config 에 병합.\n"
+            + render_gitconfig(pack_settings)
+        )
     # LFS 사용 시 하드닝된 .gitattributes도 함께 제공
     if config.lfs.enabled:
         hardened = dataclasses.replace(config.lfs, text_normalization=True)
@@ -713,6 +759,8 @@ def main() -> None:
         )
     elif command == "provision":
         _run_provision(config, args.output, args.max_file_size_mb)
+    elif command == "tune-repo":
+        _run_tune_repo(config, args.dry_run)
     elif command == "lfs-push":
         _run_lfs_push(config, args)
     else:

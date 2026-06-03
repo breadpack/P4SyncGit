@@ -136,6 +136,26 @@ class InitialImportConfig:
 
 
 @dataclass
+class PackTuningConfig:
+    """대용량 repo git pack/gc 저수준 튜닝. import 시 repo 에 주입.
+
+    repack/gc 메모리·시간 절감 + bitmap/commit-graph 로 clone/fetch 서빙 가속.
+    크기 값은 git 표기(예: "512m", "2g")를 그대로 쓴다.
+    """
+    enabled: bool = True
+    big_file_threshold: str = "512m"
+    pack_size_limit: str = "2g"
+    window: int = 10
+    depth: int = 50
+    threads: int = 0                 # 0 = 코어 수 자동
+    window_memory: str = "1g"
+    write_bitmaps: bool = True
+    write_bitmap_hash_cache: bool = True
+    commit_graph: bool = True
+    index_version: int = 4
+
+
+@dataclass
 class CutoverConfig:
     """P4→Git 컷오버 최종 무결성 검증 전략.
 
@@ -260,6 +280,7 @@ class AppConfig:
     state: StateConfig
     sync: SyncConfig = field(default_factory=SyncConfig)
     initial_import: InitialImportConfig = field(default_factory=InitialImportConfig)
+    pack_tuning: PackTuningConfig = field(default_factory=PackTuningConfig)
     cutover: CutoverConfig = field(default_factory=CutoverConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     slack: SlackConfig = field(default_factory=SlackConfig)
@@ -277,6 +298,7 @@ class AppConfig:
             state=StateConfig(**data.get("state", {})),
             sync=SyncConfig(**data.get("sync", {})),
             initial_import=InitialImportConfig(**data.get("initial_import", {})),
+            pack_tuning=PackTuningConfig(**data.get("pack_tuning", {})),
             cutover=CutoverConfig(**data.get("cutover", {})),
             logging=LoggingConfig(**data.get("logging", {})),
             slack=SlackConfig(**data.get("slack", {})),
