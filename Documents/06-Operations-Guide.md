@@ -147,7 +147,7 @@ Git 커밋 로그에서 State DB를 재구성합니다.
 p4gitsync rebuild-state
 ```
 
-- commit message의 `[P4CL: NNN]` 메타데이터를 파싱
+- commit message의 git trailer `P4CL: NNN` 패턴을 파싱 (구형 `[P4CL: NNN]` 대괄호 포맷도 하위호환)
 - 모든 CL ↔ commit SHA 매핑 복구
 - integration 정보도 함께 복구
 
@@ -255,6 +255,131 @@ sqlite3 /path/to/state.db ".backup /path/to/backup.db"
 
 ---
 
+## 대용량(TiB급) Depot 마이그레이션
+
+5TB 이상 Depot 마이그레이션에 권장하는 절차입니다.
+
+### 1단계 — 사전 점검 (`preflight`)
+
+```bash
+p4gitsync preflight \
+  --stream //YourDepot/main \
+  --top-dirs //YourDepot/main/Code //YourDepot/main/Content \
+  --large-threshold-mb 10 \
+  -o preflight-report.md
+```
+
+`preflight`가 보고하는 항목:
+- head/history 용량 사이징 및 history 전략 권고 (`full` / `truncate` / `hybrid`)
+- case-collision 탐지 (P4 대소문자 무시 → Git 대소문자 구분 충돌)
+- 비-LFS 대용량 파일 목록 (git 본문에 박힐 위험)
+- 로컬 디스크 여유 점검 (history 용량 × 1.5 기준)
+
+blocker 발견 시 `exit 1`. 모두 통과 후 다음 단계 진행.
+
+### 2단계 — History 전략 및 LFS 설정
+
+**LFS 자동 라우팅** — `config.toml`에서 설정:
+
+```toml
+[lfs]
+enabled = true
+extensions = [".uasset", ".umap", ".fbx", ".png", ...]   # 확장자 화이트리스트
+size_threshold_bytes = 102400                              # 100KB
+auto_detect_binary = true   # 확장자에 없어도 P4 binary 타입이면 크기 임계로 라우팅
+# binary_size_threshold_bytes = 102400                    # binary 별도 임계(미지정 시 위 값 사용)
+```
+
+**중간 repack** — pack 파편화 분산:
+
+```toml
+[initial_import]
+repack_interval_checkpoints = 10   # 10 checkpoint(=10,000 CL)마다 git repack -ad
+```
+
+### 3단계 — Import
+
+```bash
+p4gitsync import --stream //YourDepot/main
+```
+
+import 실행 시 자동 적용되는 안전장치:
+- `[pack_tuning]` 설정 repo 자동 주입 (big_file_threshold / bitmap / commit-graph)
+- 대형 CL 메모리 스트리밍 (`streaming_file_threshold` / `streaming_bytes_threshold`)
+- P4 서버 부하 throttle (`server_load_threshold` / `throttle_wait_seconds`)
+- LFS 임시파일 정리
+- 중단 후 `resume_on_restart=true`로 마지막 체크포인트에서 재개
+
+### 4단계 — LFS 객체 업로드 (`lfs-push`)
+
+import 후 LFS 객체를 remote에 업로드합니다:
+
+```bash
+# 기본 (200 OID/배치, 재개 가능)
+p4gitsync lfs-push
+
+# 오류 시에도 계속 진행
+p4gitsync lfs-push --batch-size 100 --continue-on-error
+
+# 중단 후 재개 (완료 OID 자동 건너뜀)
+p4gitsync lfs-push
+```
+
+### 5단계 — 거버넌스 적용
+
+팀 설정 파일 생성:
+
+```bash
+p4gitsync provision -o ./team-setup --max-file-size-mb 10
+```
+
+GitLab 거버넌스 직접 적용:
+
+```bash
+p4gitsync provision-gitlab \
+  --gitlab-url https://gitlab.company.com \
+  --project mygroup/myrepo \
+  --protect main develop \
+  --merge-train
+
+# GitHub Rulesets 적용
+p4gitsync provision-github \
+  --repo myorg/myrepo \
+  --protect main \
+  --merge-method squash \
+  --required-approvals 2
+```
+
+### 6단계 — 개발자 clone 가이드
+
+**번들 생성 + Bundle URI 배포** (100GB+ repo 초기 clone 부하 분산):
+
+```bash
+# 번들 생성
+p4gitsync bundle -o /cdn/repo.bundle
+
+# 클라이언트 clone
+git clone --bundle-uri=https://cdn.company.com/repo.bundle \
+  git@github.com:org/repo.git
+
+# provision이 생성한 bootstrap 스크립트 사용 (BUNDLE_URI 환경변수 지원)
+BUNDLE_URI=https://cdn.company.com/repo.bundle ./bootstrap-clone.sh
+```
+
+**partial clone + sparse-checkout** — 역할별 최소 clone:
+
+```bash
+# provision이 생성한 bootstrap 스크립트를 역할별로 배포
+# - bootstrap-clone.sh (Linux/Mac)
+# - bootstrap-clone.ps1 (Windows)
+```
+
+### 7단계 — 컷오버
+
+아래 [§ 컷오버 절차](#컷오버-절차) 참조. 대용량 depot에서는 `[cutover].verify_mode = "smart"`(기본값)로 freeze 윈도우를 통제합니다.
+
+---
+
 ## 컷오버 절차
 
 ### 사전 준비
@@ -262,6 +387,7 @@ sqlite3 /path/to/state.db ".backup /path/to/backup.db"
 1. **동기화 지연 확인**: `curl /api/cutover-readiness`로 `total_lag=0` 확인
 2. **미해결 에러 처리**: `curl /api/errors`로 에러 목록 확인 및 해결
 3. **무결성 검증 통과**: Circuit Breaker가 CLOSED 상태인지 확인
+4. **verify_mode 전략 결정**: 대형 depot은 `"smart"` (기본값) 유지. 필요 시 `verify_workers` 증가로 병렬도 조정
 
 ### Dry Run
 
@@ -269,7 +395,7 @@ sqlite3 /path/to/state.db ".backup /path/to/backup.db"
 p4gitsync cutover --dry-run
 ```
 
-실제 변경 없이 모든 체크를 실행합니다. 결과를 확인하고 문제가 없으면 실제 실행합니다.
+실제 변경 없이 모든 체크를 실행합니다. 무결성 검증은 샘플 50개 고정으로 수행됩니다. 결과를 확인하고 문제가 없으면 실제 실행합니다.
 
 ### 실행
 
@@ -277,11 +403,17 @@ p4gitsync cutover --dry-run
 # 1. P4 submit 차단 (P4 admin)
 p4 configure set submit.disable=1
 
-# 2. 컷오버 실행
+# 2. 컷오버 실행 (verify_mode=smart 기본 적용)
 p4gitsync cutover --execute
 
 # 3. 결과 확인 후 P4 사용 중단
 ```
+
+**INTEGRITY_VERIFY 단계 동작** (`verify_mode=smart` 기준):
+- `verify_large_threshold_bytes`(기본 5MiB) 이상 파일: 전수 검증
+- 나머지 파일: `verify_sample_count`개 무작위 샘플 검증
+- `verify_workers`개 P4 연결을 병렬 사용
+- LFS 파일: 로컬 LFS object MD5 ↔ P4 `fstat` digest 교차검증
 
 ### 실패 시
 

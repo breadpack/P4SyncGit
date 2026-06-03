@@ -122,6 +122,76 @@ remote_url = ""
 
 ---
 
+## Pack 튜닝 설정 (`[pack_tuning]`)
+
+대용량 repo의 git pack/gc 저수준 파라미터를 제어합니다. `import` 시작 시 repo에 자동 주입되며, `p4gitsync tune-repo`로 기존 repo에 수동 적용도 가능합니다.
+
+| 키 | 타입 | 기본값 | 설명 |
+|----|------|--------|------|
+| enabled | bool | `true` | 이 설정 블록 활성화 여부 |
+| big_file_threshold | str | `"512m"` | 이 이상 blob은 delta 시도를 생략 — 시간·메모리 절감 |
+| pack_size_limit | str | `"2g"` | 단일 packfile 상한 — 전송·호스팅 제약 및 분할 |
+| window | int | `10` | delta 탐색 윈도우 크기 |
+| depth | int | `50` | delta 체인 최대 깊이 |
+| threads | int | `0` | gc/repack 스레드 수 (`0`=코어 수 자동) |
+| window_memory | str | `"1g"` | 스레드당 윈도우 메모리 상한 — 대형 gc OOM 방지 |
+| write_bitmaps | bool | `true` | bitmap 인덱스 생성 — clone/fetch 서빙 가속 |
+| write_bitmap_hash_cache | bool | `true` | bitmap hash cache 활성화 |
+| commit_graph | bool | `true` | commit-graph 사용 및 gc/fetch 시 갱신 |
+| index_version | int | `4` | packfile 인덱스 버전 — 파일 수가 많을 때 v4가 작고 빠름 |
+| serve_partial_clone | bool | `true` | `uploadpack.allowFilter` 설정 — 서버/bare repo가 클라이언트 `--filter` partial clone 허용. 관리형 GitLab/GitHub는 기본 허용이지만 self-hosted/bare에는 필수 |
+
+크기 값(`big_file_threshold`, `pack_size_limit`, `window_memory`)은 git 표기법을 그대로 사용합니다 (예: `"512m"`, `"2g"`).
+
+```toml
+[pack_tuning]
+enabled = true
+big_file_threshold = "512m"
+pack_size_limit = "2g"
+window = 10
+depth = 50
+threads = 0
+window_memory = "1g"
+write_bitmaps = true
+write_bitmap_hash_cache = true
+commit_graph = true
+index_version = 4
+serve_partial_clone = true
+```
+
+---
+
+## 컷오버 설정 (`[cutover]`)
+
+P4→Git 컷오버의 최종 무결성 검증 전략을 제어합니다. 대형 depot에서 freeze 윈도우를 초과하지 않도록 검증 범위와 병렬도를 조정합니다.
+
+| 키 | 타입 | 기본값 | 설명 |
+|----|------|--------|------|
+| verify_mode | str | `"smart"` | 검증 전략: `full`(전수) / `sample`(무작위 N) / `smart`(대형 전수 + 나머지 샘플) |
+| verify_sample_count | int | `1000` | `sample` / `smart` 모드에서 코드 파일 샘플 수 |
+| verify_workers | int | `4` | 병렬 검증 워커 수 (다중 P4 연결 사용) |
+| verify_large_threshold_bytes | int | `5242880` | `smart` 모드에서 전수 검증할 파일 크기 임계 (기본 5MiB) |
+
+**`verify_mode` 전략 선택 기준**:
+
+| 전략 | 권장 상황 |
+|------|----------|
+| `smart` (기본) | 대부분의 경우. 대형 바이너리 전수 + 코드 파일 샘플로 freeze 윈도우 통제 |
+| `full` | 소규모 depot 또는 freeze 시간 여유가 충분한 경우 |
+| `sample` | 대형 depot에서 freeze 윈도우가 극히 짧은 경우 (리스크 높음) |
+
+LFS 파일은 verify_mode에 관계없이 로컬 LFS object MD5 ↔ P4 `fstat` digest 교차검증을 수행합니다.
+
+```toml
+[cutover]
+verify_mode = "smart"
+verify_sample_count = 1000
+verify_workers = 4
+verify_large_threshold_bytes = 5242880
+```
+
+---
+
 ## 로깅 설정 (`[logging]`)
 
 | 키 | 환경변수 | 타입 | 기본값 | 설명 |
@@ -261,6 +331,26 @@ batch_size = 50
 [initial_import]
 use_fast_import = true
 resume_on_restart = true
+
+[pack_tuning]
+enabled = true
+big_file_threshold = "512m"
+pack_size_limit = "2g"
+window = 10
+depth = 50
+threads = 0
+window_memory = "1g"
+write_bitmaps = true
+write_bitmap_hash_cache = true
+commit_graph = true
+index_version = 4
+serve_partial_clone = true
+
+[cutover]
+verify_mode = "smart"
+verify_sample_count = 1000
+verify_workers = 4
+verify_large_threshold_bytes = 5242880
 
 [logging]
 level = "INFO"

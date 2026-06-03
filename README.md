@@ -250,23 +250,43 @@ def git_to_p4(commit_info: dict) -> dict:
 
 ## CLI 명령어
 
+### 실행·서비스
+
 | 명령 | 설명 |
 |------|------|
-| `p4gitsync setup` | 대화형 config.toml 생성/수정 |
-| `p4gitsync preflight [--stream] [--top-dirs ...]` | 마이그레이션 사전 점검 — 용량(head/history)·전략 권고·case충돌·비LFS대용량 (blocker 발견 시 exit 1) |
-| `p4gitsync provision [-o dir]` | 팀 사용 권장 설정 생성 — 역할별 bootstrap-clone(sh/ps1)·pre-receive 훅·gitconfig·.gitattributes·GitLab 체크리스트 |
-| `p4gitsync provision-gitlab --gitlab-url U --project P [--dry-run]` | GitLab API로 거버넌스 직접 적용 — push rule(max file size)·protected branch(force-push 금지)·LFS·merge train. 토큰은 env `GITLAB_TOKEN` |
-| `p4gitsync lfs-push [--batch-size N] [--continue-on-error] [--reset-progress]` | LFS 객체를 배치 단위로 업로드(재개 가능) — TiB급 마이그레이션용. 완료 OID를 진행 파일에 기록해 중단 후 이어서 진행 |
 | `p4gitsync run` | 동기화 루프 실행 (포그라운드) |
-| `p4gitsync service install` | OS 서비스로 등록 (Windows: NSSM, Linux: systemd) |
-| `p4gitsync service start/stop` | 서비스 시작/중지 |
-| `p4gitsync service uninstall` | 서비스 제거 |
-| `p4gitsync status` | 등록된 서비스 상태 조회 |
-| `p4gitsync import [--stream]` | 초기 히스토리 import |
-| `p4gitsync resync --from N --to M` | CL 범위 재동기화 |
-| `p4gitsync rebuild-state` | Git log에서 State DB 재구성 |
-| `p4gitsync reinit-git --remote URL` | Git repo 재초기화 |
-| `p4gitsync cutover --dry-run/--execute` | P4→Git 컷오버 |
+| `p4gitsync setup` | 대화형 config.toml 생성/수정 마법사 |
+| `p4gitsync service install/start/stop/uninstall` | OS 서비스 등록·관리 (Windows: NSSM, Linux: systemd) |
+| `p4gitsync status [--name NAME]` | 동기화 상태 조회 |
+
+### 마이그레이션·히스토리
+
+| 명령 | 설명 |
+|------|------|
+| `p4gitsync preflight [--stream] [--top-dirs ...] [--large-threshold-mb N] [-o FILE]` | 마이그레이션 사전 점검 — 용량·전략 권고·case충돌·비LFS대용량·디스크 여유 (blocker 발견 시 exit 1) |
+| `p4gitsync import [--stream] [--streams ...]` | 초기 히스토리 import (LFS 포인터 생성, pack 튜닝 자동 주입) |
+| `p4gitsync resync --from N --to M [--stream]` | CL 범위 재동기화 |
+| `p4gitsync rebuild-state` | Git log의 `P4CL:` trailer에서 State DB 재구성 |
+| `p4gitsync reinit-git --remote URL` | Git repo 재초기화 (remote clone) |
+| `p4gitsync cutover --dry-run/--execute` | P4→Git 컷오버 5단계 (`verify_mode` 전략 적용) |
+| `p4gitsync lfs-push [--remote] [--batch-size N] [--continue-on-error] [--reset-progress]` | LFS 객체 배치 업로드(재개 가능) — TiB급 마이그레이션용 |
+
+### 탐색·미리보기
+
+| 명령 | 설명 |
+|------|------|
+| `p4gitsync tree [--depot] [--include-deleted] [--include-virtual]` | P4 Stream 계층 트리 미리보기 |
+| `p4gitsync preview [--depot] [-o FILE] [--no-merge-scan] [--merge-scan-limit N]` | import branch/merge 타임라인 문서 생성 |
+
+### 거버넌스·프로비저닝
+
+| 명령 | 설명 |
+|------|------|
+| `p4gitsync provision [-o DIR] [--max-file-size-mb N]` | 팀 권장 설정 생성 — bootstrap-clone(sh/ps1, BUNDLE_URI 지원)·pre-receive 훅·gitconfig·.gitattributes |
+| `p4gitsync provision-gitlab --gitlab-url U --project P [--protect ...] [--merge-train] [--dry-run]` | GitLab API 거버넌스 적용 — push rule·protected branch·LFS·merge train. 토큰: env `GITLAB_TOKEN` |
+| `p4gitsync provision-github --repo OWNER/REPO [--protect ...] [--merge-method] [--merge-queue] [--dry-run]` | GitHub Rulesets API 거버넌스 적용 — push ruleset·branch protection·merge queue. 토큰: env `GITHUB_TOKEN` |
+| `p4gitsync tune-repo [--dry-run]` | `[pack_tuning]` 설정을 현재 repo에 직접 적용 |
+| `p4gitsync bundle [-o FILE] [--all]` | repo 번들(.bundle) 생성 — Bundle URI 초기 clone 부하 분산용 |
 
 Docker 환경에서는 `docker compose exec p4gitsync` 접두사를 붙여 실행합니다.
 

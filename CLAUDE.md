@@ -92,8 +92,20 @@ P4 Server -> [Trigger/Poller] -> Redis Stream/직접 -> EventConsumer -> SyncOrc
 | 명령 | 설명 |
 |------|------|
 | `p4gitsync run` | 동기화 루프 실행 (기본) |
-| `p4gitsync import [--stream]` | 초기 히스토리 import |
+| `p4gitsync setup` | 대화형 config.toml 생성/수정 마법사 |
+| `p4gitsync service install/start/stop/uninstall` | OS 서비스 등록·관리 |
+| `p4gitsync status` | 동기화 상태 조회 |
+| `p4gitsync preflight [--stream] [--top-dirs ...] [-o FILE]` | 마이그레이션 사전 점검 (용량·case충돌·비LFS대용량·디스크) |
+| `p4gitsync import [--stream] [--streams ...]` | 초기 히스토리 import |
 | `p4gitsync resync --from N --to M` | CL 범위 재동기화 |
 | `p4gitsync rebuild-state` | Git log에서 State DB 재구성 |
 | `p4gitsync reinit-git --remote URL` | Git repo 재초기화 |
-| `p4gitsync cutover --dry-run/--execute` | P4->Git 컷오버 |
+| `p4gitsync cutover --dry-run/--execute` | P4->Git 컷오버 (verify_mode 전략 적용) |
+| `p4gitsync lfs-push [--batch-size N] [--continue-on-error]` | LFS 객체 배치 업로드 (재개 가능) |
+| `p4gitsync tree [--depot]` | P4 Stream 계층 미리보기 |
+| `p4gitsync preview [--depot] [-o FILE]` | import 타임라인 문서 생성 |
+| `p4gitsync provision [-o DIR]` | 팀 권장 설정 파일 생성 |
+| `p4gitsync provision-gitlab --gitlab-url U --project P` | GitLab API 거버넌스 적용 |
+| `p4gitsync provision-github --repo OWNER/REPO` | GitHub Rulesets API 거버넌스 적용 |
+| `p4gitsync tune-repo [--dry-run]` | pack/gc 튜닝 현재 repo에 적용 |
+| `p4gitsync bundle [-o FILE] [--all]` | repo 번들(.bundle) 생성 |

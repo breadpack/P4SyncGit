@@ -20,7 +20,7 @@ P4GitSync는 Perforce(Helix Core) Stream의 전체 히스토리를 Git에 정확
 | Bare Repository 지원 | remote 없이 로컬 bare repo에 직접 동기화 가능 |
 | 무결성 검증 | P4/Git 간 파일 내용 주기적 비교 + Circuit Breaker 자동 중단 |
 | 장애 복구 | State DB 재구성, Git repo 재초기화, 실패 CL 자동/수동 재시도 |
-| 컷오버 | P4→Git 전환 5단계 프로세스 |
+| 컷오버 | P4→Git 전환 5단계 프로세스 (`verify_mode` 전략 + 병렬 검증 + LFS 원본 교차검증) |
 | 모니터링 | HTTP API(FastAPI) + Slack 알림 (심각도별 채널 분리) |
 
 ## 시스템 아키텍처
@@ -129,7 +129,7 @@ git push → Git Remote (설정 시)
 | SlackNotifier | `notifications/notifier.py` | 심각도별 Slack 알림 |
 | SilenceDetector | `notifications/silence_detector.py` | 침묵 장애 감지 |
 | DailyReporter | `notifications/daily_report.py` | 일일 동기화 리포트 |
-| CutoverManager | `services/cutover.py` | P4→Git 전환 프로세스 |
+| CutoverManager | `services/cutover.py` | P4→Git 전환 5단계 프로세스. `verify_mode` 전략(smart/full/sample)·다중 워커 병렬 검증·LFS MD5 교차검증 |
 
 ## 기술 스택
 
