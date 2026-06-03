@@ -153,6 +153,9 @@ class PackTuningConfig:
     write_bitmap_hash_cache: bool = True
     commit_graph: bool = True
     index_version: int = 4
+    # 서버/bare repo 가 클라이언트의 partial clone(--filter)을 허용하도록.
+    # 관리형 서버(GitLab/GitHub)는 기본 허용이라 무해, self-hosted/bare 에는 필수.
+    serve_partial_clone: bool = True
 
 
 @dataclass

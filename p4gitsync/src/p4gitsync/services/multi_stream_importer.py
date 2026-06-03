@@ -77,6 +77,10 @@ class MultiStreamImporter:
             streams: import할 P4 stream 경로 목록 (예: ["//depot/main", "//depot/develop"])
             default_branch: mainline stream의 Git branch 이름
         """
+        # 이전 크래시로 남은 LFS 임시 파일 정리(디스크 잠식 방지).
+        if self._lfs_store:
+            self._lfs_store.cleanup_tmp()
+
         # 1. Stream 계층 구성
         tree = self._build_stream_tree(streams, default_branch)
         import_order = self._flatten_tree(tree)

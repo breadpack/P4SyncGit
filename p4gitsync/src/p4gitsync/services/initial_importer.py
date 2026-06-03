@@ -100,6 +100,10 @@ class InitialImporter:
         """전체 히스토리 import 실행."""
         last_cl = self._state.get_last_synced_cl(self._stream)
 
+        # 이전 크래시로 남은 LFS 임시 파일 정리(디스크 잠식 방지). 워커 시작 전이라 안전.
+        if self._lfs_store:
+            self._lfs_store.cleanup_tmp()
+
         # 전체 CL 을 한 번만 조회해 진행률과 남은 목록을 함께 계산(중복 호출 제거).
         all_full = self._p4.get_changes_after(self._poll_stream, 0)
         grand_total = len(all_full)
@@ -260,6 +264,12 @@ class InitialImporter:
                     pass
                 self._main_extract_client = None
             prefetch_thread.join(timeout=5)
+            # 워커 종료 후 LFS 임시 파일 정리(부분 추출 잔재 제거).
+            if self._lfs_store:
+                try:
+                    self._lfs_store.cleanup_tmp()
+                except Exception:
+                    pass
 
         if last_written_cl > 0 and final_rc == 0:
             self._post_import(branch, last_written_cl)

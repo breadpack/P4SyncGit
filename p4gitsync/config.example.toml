@@ -57,6 +57,7 @@ write_bitmaps = true             # bitmap 인덱스(clone/fetch 서빙 가속)
 write_bitmap_hash_cache = true
 commit_graph = true              # commit-graph 사용 + gc/fetch 시 갱신
 index_version = 4                # 인덱스 v4(많은 파일에서 작고 빠름)
+serve_partial_clone = true       # 서버/bare repo 가 클라이언트 partial clone(--filter) 허용
 
 # P4→Git 컷오버 최종 무결성 검증 전략(대형 depot 의 freeze 윈도우 통제).
 [cutover]

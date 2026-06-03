@@ -53,6 +53,12 @@ def build_pack_config(cfg) -> list[tuple[str, str]]:
         ]
     if cfg.index_version and cfg.index_version > 0:
         settings.append(("index.version", str(cfg.index_version)))
+    if getattr(cfg, "serve_partial_clone", False):
+        # 클라이언트 blobless/partial clone(--filter)을 서버가 허용
+        settings += [
+            ("uploadpack.allowFilter", "true"),
+            ("uploadpack.allowAnySHA1InWant", "true"),
+        ]
     return settings
 
 

@@ -18,6 +18,11 @@ class TestBootstrapSh:
         for role in ("code)", "client)", "artist)", "full)"):
             assert role in out
 
+    def test_bundle_uri_support(self):
+        out = provisioner.generate_bootstrap_sh("r", "main")
+        assert "BUNDLE_URI" in out
+        assert "--bundle-uri=" in out
+
 
 class TestBootstrapPs1:
     def test_contains_core_settings(self):
@@ -26,6 +31,8 @@ class TestBootstrapPs1:
         assert "core.longpaths true" in out          # Windows 긴 경로
         assert "sparse-checkout" in out
         assert '$Branch = "develop"' in out
+        assert "BUNDLE_URI" in out
+        assert "--bundle-uri=" in out
 
 
 class TestPreReceiveHook:

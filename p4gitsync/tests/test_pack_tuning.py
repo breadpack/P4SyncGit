@@ -42,6 +42,13 @@ class TestBuildPackConfig:
         assert s["pack.window"] == "20"
         assert s["pack.depth"] == "100"
 
+    def test_serve_partial_clone_toggle(self):
+        on = dict(pack_tuning.build_pack_config(PackTuningConfig(serve_partial_clone=True)))
+        assert on["uploadpack.allowFilter"] == "true"
+        assert on["uploadpack.allowAnySHA1InWant"] == "true"
+        off = dict(pack_tuning.build_pack_config(PackTuningConfig(serve_partial_clone=False)))
+        assert "uploadpack.allowFilter" not in off
+
 
 class TestRenderGitconfig:
     def test_empty(self):

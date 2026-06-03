@@ -57,12 +57,14 @@ def generate_bootstrap_sh(
 # 거대 repo를 통째로 받지 않도록 partial clone + sparse-checkout + LFS 부분 fetch.
 # 사용: ./bootstrap-clone.sh <role> [dest-dir]
 #   role: {role_names}
+#   BUNDLE_URI=<URL>  (선택) 초기 clone 을 번들에서 받아 서버 부하 오프로드
 set -euo pipefail
 
 REMOTE="{remote_url}"
 BRANCH="{default_branch}"
 ROLE="${{1:-code}}"
 DEST="${{2:-repo}}"
+BUNDLE_URI="${{BUNDLE_URI:-}}"
 
 # ── 역할별 sparse 경로 / LFS include·exclude (프로젝트에 맞게 수정) ──
 case "$ROLE" in
@@ -70,8 +72,12 @@ case "$ROLE" in
   *) echo "unknown role: $ROLE ({role_names})"; exit 1 ;;
 esac
 
-# blobless partial clone (객체 lazy fetch)
-git clone --filter=blob:none --no-checkout "$REMOTE" "$DEST"
+# blobless partial clone (객체 lazy fetch). BUNDLE_URI 지정 시 번들로 초기 전달 오프로드.
+if [ -n "$BUNDLE_URI" ]; then
+  git clone --bundle-uri="$BUNDLE_URI" --filter=blob:none --no-checkout "$REMOTE" "$DEST"
+else
+  git clone --filter=blob:none --no-checkout "$REMOTE" "$DEST"
+fi
 cd "$DEST"
 
 # 대형 repo 성능 스택 (Git 2.38+ 내장 scalar: FSMonitor/commit-graph/sparse-index 등)
@@ -116,7 +122,13 @@ switch ($Role) {{
   default {{ Write-Error "unknown role: $Role ({role_names})"; exit 1 }}
 }}
 
-git clone --filter=blob:none --no-checkout $Remote $Dest
+# BUNDLE_URI 환경변수 지정 시 번들로 초기 clone 오프로드
+$BundleUri = $env:BUNDLE_URI
+if ($BundleUri) {{
+  git clone --bundle-uri="$BundleUri" --filter=blob:none --no-checkout $Remote $Dest
+}} else {{
+  git clone --filter=blob:none --no-checkout $Remote $Dest
+}}
 Set-Location $Dest
 
 # Windows 긴 경로(Unity 깊은 에셋 경로) 대응

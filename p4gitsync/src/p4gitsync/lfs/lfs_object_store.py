@@ -4,6 +4,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -68,6 +69,34 @@ class LfsObjectStore:
         return LfsPointer(
             oid=oid, size=size, pointer_bytes=format_lfs_pointer(oid, size)
         )
+
+    def cleanup_tmp(self, older_than_seconds: float = 0.0) -> int:
+        """tmp 디렉토리의 잔여 임시 파일을 정리. 삭제한 파일 수 반환.
+
+        크래시로 남은 부분 추출 파일(.lfs.tmp 등)이 디스크를 잠식하지 않도록
+        import 시작/종료 시 호출한다. ``older_than_seconds=0`` 이면 전체 삭제.
+        진행 중인 추출과 겹치지 않는 시점(워커 시작 전/종료 후)에만 호출할 것.
+        """
+        removed = 0
+        now = time.time()
+        try:
+            entries = list(self._tmp_dir.iterdir())
+        except OSError:
+            return 0
+        for p in entries:
+            try:
+                if not p.is_file():
+                    continue
+                if older_than_seconds > 0:
+                    if now - p.stat().st_mtime < older_than_seconds:
+                        continue
+                p.unlink()
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            logger.info("LFS tmp 정리: %d개 파일 삭제 (%s)", removed, self._tmp_dir)
+        return removed
 
     def exists(self, oid: str) -> bool:
         return self.object_path(oid).exists()

@@ -15,6 +15,25 @@ def store(git_dir: Path) -> LfsObjectStore:
     return LfsObjectStore(git_dir)
 
 
+class TestCleanupTmp:
+    def test_removes_all_when_age_zero(self, store: LfsObjectStore):
+        for i in range(3):
+            (store.tmp_dir / f"leftover{i}.lfs.tmp").write_bytes(b"x")
+        removed = store.cleanup_tmp()
+        assert removed == 3
+        assert list(store.tmp_dir.iterdir()) == []
+
+    def test_respects_age_threshold(self, store: LfsObjectStore):
+        # 방금 만든 파일은 오래된 것이 아니므로 보존
+        (store.tmp_dir / "fresh.tmp").write_bytes(b"x")
+        removed = store.cleanup_tmp(older_than_seconds=3600)
+        assert removed == 0
+        assert (store.tmp_dir / "fresh.tmp").exists()
+
+    def test_empty_dir_returns_zero(self, store: LfsObjectStore):
+        assert store.cleanup_tmp() == 0
+
+
 class TestStoreFromStream:
     def test_stores_and_returns_pointer(self, store: LfsObjectStore):
         content = b"hello world binary content"

@@ -184,6 +184,17 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run", action="store_true", help="적용할 설정만 출력(실제 변경 없음)",
     )
 
+    bundle_parser = subparsers.add_parser(
+        "bundle",
+        help="repo 번들(.bundle) 생성 — 대형 repo 초기 clone 부하를 Bundle URI 로 오프로드",
+    )
+    bundle_parser.add_argument(
+        "--output", "-o", default="repo.bundle", help="번들 출력 경로 (기본: repo.bundle)",
+    )
+    bundle_parser.add_argument(
+        "--all", action="store_true", help="모든 ref 포함(기본: default_branch 만)",
+    )
+
     subparsers.add_parser("setup", help="대화형 설정 마법사 (config.toml 생성/수정)")
 
     service_parser = subparsers.add_parser("service", help="서비스 관리")
@@ -232,6 +243,16 @@ def _run_sync(config: AppConfig) -> None:
         orchestrator.start()
 
 
+def _build_lfs_store(config: AppConfig):
+    """config 기반 LfsObjectStore 생성(LFS 비활성 시 None). orchestrator 와 동일 규약."""
+    if not config.lfs.enabled:
+        return None
+    from p4gitsync.lfs.lfs_object_store import LfsObjectStore
+    repo_path = Path(config.git.repo_path)
+    git_dir = repo_path if config.git.bare else repo_path / ".git"
+    return LfsObjectStore(git_dir=git_dir)
+
+
 def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None = None) -> None:
     from p4gitsync.git.pack_tuning import ensure_repo_tuned
     from p4gitsync.state.state_store import StateStore
@@ -241,6 +262,9 @@ def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None
 
     state_store = StateStore(config.state.db_path)
     state_store.initialize()
+
+    # LFS object store (활성 시) — import 가 LFS 포인터/객체를 생성하고 tmp 를 정리하도록
+    lfs_store = _build_lfs_store(config)
 
     p4_client = config.p4.create_client()
     p4_client.connect()
@@ -258,6 +282,7 @@ def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None
                 repo_path=config.git.repo_path,
                 config=config.initial_import,
                 lfs_config=config.lfs if config.lfs.enabled else None,
+                lfs_store=lfs_store,
                 user_mapper=user_mapper,
             )
             importer.run(streams, config.git.default_branch)
@@ -273,6 +298,7 @@ def _run_import(config: AppConfig, stream: str | None, streams: list[str] | None
                 stream=p4_stream,
                 config=config.initial_import,
                 lfs_config=config.lfs if config.lfs.enabled else None,
+                lfs_store=lfs_store,
             )
             importer.run(config.git.default_branch)
     finally:
@@ -626,6 +652,30 @@ def _run_tune_repo(config: AppConfig, dry_run: bool) -> None:
         print(f"  - {key} = {value}")
 
 
+def _run_bundle(config: AppConfig, args) -> None:
+    import os
+    import subprocess
+
+    repo = config.git.repo_path
+    output = os.path.abspath(args.output)
+    refs = ["--all"] if args.all else [config.git.default_branch]
+    result = subprocess.run(
+        ["git", "bundle", "create", output, *refs],
+        cwd=repo, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"git bundle 생성 실패: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    size = os.path.getsize(output) if os.path.exists(output) else 0
+    scope = "all refs" if args.all else config.git.default_branch
+    print(f"번들 생성 완료: {output} ({size:,} bytes, refs={scope})")
+    print(
+        "배포: 이 번들을 CDN/오브젝트 스토리지에 업로드 후, clone 시 "
+        "`git clone --bundle-uri=<URL>` 또는 bootstrap 의 BUNDLE_URI 환경변수로 사용하세요."
+    )
+
+
 def _run_provision(config: AppConfig, output: str, max_file_size_mb: float) -> None:
     import dataclasses
 
@@ -761,6 +811,8 @@ def main() -> None:
         _run_provision(config, args.output, args.max_file_size_mb)
     elif command == "tune-repo":
         _run_tune_repo(config, args.dry_run)
+    elif command == "bundle":
+        _run_bundle(config, args)
     elif command == "lfs-push":
         _run_lfs_push(config, args)
     else:
